@@ -1,5 +1,5 @@
 import React from 'react';
-import { Upgrade, UpgradeType } from '../types';
+import { CosmicEvent, Upgrade, UpgradeType } from '../types';
 import { 
   Sword, 
   Zap, 
@@ -9,7 +9,8 @@ import {
   Gauge, 
   Magnet, 
   Layers, 
-  Coins 
+  Coins,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -17,6 +18,7 @@ interface UpgradePanelProps {
   upgrades: Upgrade[];
   minerals: number;
   onUpgrade: (type: UpgradeType) => void;
+  currentEvent: CosmicEvent | null;
 }
 
 const uIcons: Record<UpgradeType, React.ComponentType<any>> = {
@@ -45,9 +47,26 @@ export const UpgradePanel: React.FC<UpgradePanelProps> = ({
   upgrades,
   minerals,
   onUpgrade,
+  currentEvent,
 }) => {
+  const isShopOpen = currentEvent?.type === 'space_market';
+
   return (
-    <div className="w-full max-w-sm bg-neutral-950/85 backdrop-blur-md rounded-2xl border border-neutral-800 p-4 shadow-2xl flex flex-col gap-3 pointer-events-auto max-h-[85vh] overflow-y-auto custom-scrollbar">
+    <div className="w-full max-w-sm bg-neutral-950/85 backdrop-blur-md rounded-2xl border border-neutral-800 p-4 shadow-2xl flex flex-col gap-3 pointer-events-auto max-h-[85vh] overflow-y-auto custom-scrollbar relative min-h-[460px]">
+      
+      {/* Event Merchant Lock Overlay */}
+      {!isShopOpen && (
+        <div className="absolute inset-0 bg-neutral-950/90 backdrop-blur-[4px] z-20 flex flex-col items-center justify-center text-center p-6 rounded-2xl transition-all duration-300">
+          <div className="w-12 h-12 rounded-full border border-neutral-800/80 bg-neutral-900/40 flex items-center justify-center text-neutral-500 mb-4 shadow-[0_0_20px_rgba(0,0,0,0.5)]">
+            <Lock className="w-5 h-5 text-amber-500 animate-pulse" />
+          </div>
+          <h3 className="font-sans font-black text-sm text-neutral-200 uppercase tracking-tight">상점 폐쇄 (인증 퓨즈 없음)</h3>
+          <p className="text-[10px] text-neutral-400 max-w-[210px] mt-1.5 leading-relaxed">
+            상시 업그레이드를 이용할 수 가 없습니다. 무작위 <span className="text-amber-400 font-bold">성간 수송선 정박 (상점 개방)</span> 이벤트 출현 시에만 전원 커넥터 자물쇠가 풀립니다!
+          </p>
+        </div>
+      )}
+
       <div className="flex items-center justify-between border-b border-neutral-800 pb-2 mb-1">
         <div className="flex items-center gap-2">
           <Coins className="w-5 h-5 text-yellow-400 animate-pulse" />

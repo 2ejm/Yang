@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { GameStats, Upgrade, UpgradeType } from './types';
+import { GameStats, Upgrade, UpgradeType, CosmicEvent } from './types';
 import { GameCanvas } from './components/GameCanvas';
 import { UpgradePanel } from './components/UpgradePanel';
 import { GameHUD } from './components/GameHUD';
@@ -39,6 +39,7 @@ export default function App() {
   const [minerals, setMinerals] = useState(0);
   const [shipHp, setShipHp] = useState(100);
   const [pirateActive, setPirateActive] = useState(false);
+  const [currentEvent, setCurrentEvent] = useState<CosmicEvent | null>(null);
   const [stats, setStats] = useState<GameStats>({
     score: 0,
     mineralsCollected: 0,
@@ -71,6 +72,7 @@ export default function App() {
     setMinerals(0);
     setShipHp(100);
     setPirateActive(false);
+    setCurrentEvent(null);
     setStats({
       score: 0,
       mineralsCollected: 0,
@@ -265,6 +267,63 @@ export default function App() {
                 pirateActive={pirateActive}
                 minerals={minerals}
               />
+
+              {/* === COSMIC EVENTS BANNER === */}
+              <AnimatePresence mode="popLayout">
+                {currentEvent && (
+                  <motion.div 
+                    id="cosmic-event-banner"
+                    initial={{ opacity: 0, height: 0, y: -20 }}
+                    animate={{ opacity: 1, height: 'auto', y: 0 }}
+                    exit={{ opacity: 0, height: 0, y: -20 }}
+                    className={`px-4 py-3 rounded-xl border flex flex-col gap-1 backdrop-blur-md shadow-lg transition-all duration-300 ${
+                      currentEvent.type === 'idle'
+                        ? 'bg-emerald-950/20 border-emerald-500/25 text-emerald-300'
+                        : currentEvent.type === 'space_market'
+                        ? 'bg-amber-950/20 border-amber-500/35 text-amber-300 shadow-[0_0_20px_rgba(245,158,11,0.06)]'
+                        : currentEvent.type === 'blackhole_anomaly'
+                        ? 'bg-purple-950/20 border-purple-500/35 text-purple-300 shadow-[0_0_20px_rgba(168,85,247,0.06)]'
+                        : 'bg-rose-950/20 border-rose-500/35 text-rose-300 shadow-[0_0_20px_rgba(244,63,94,0.06)]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${
+                          currentEvent.type === 'idle' ? 'bg-emerald-400' : 'bg-rose-450 animate-ping'
+                        } ${
+                          currentEvent.type === 'space_market' ? 'bg-amber-400' : ''
+                        } ${
+                          currentEvent.type === 'blackhole_anomaly' ? 'bg-purple-400' : ''
+                        } ${
+                          currentEvent.type === 'pirate_raid' || currentEvent.type === 'meteor_storm' ? 'bg-rose-500' : ''
+                        }`} />
+                        <span className="font-sans font-black text-xs tracking-wider uppercase">{currentEvent.name}</span>
+                      </div>
+                      <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded-md bg-neutral-950/80 border border-neutral-800 text-indigo-300">
+                        남은 주기: {currentEvent.timeLeft}초
+                      </span>
+                    </div>
+                    <p className="font-sans text-[11px] opacity-80 leading-relaxed">{currentEvent.description}</p>
+                    
+                    {/* Linear Progress Bar of Current Event Duration */}
+                    <div className="w-full h-1 bg-neutral-900/60 rounded-full overflow-hidden mt-1">
+                      <div 
+                        className={`h-full transition-all duration-1000 ${
+                          currentEvent.type === 'idle'
+                            ? 'bg-emerald-500'
+                            : currentEvent.type === 'space_market'
+                            ? 'bg-amber-500'
+                            : currentEvent.type === 'blackhole_anomaly'
+                            ? 'bg-purple-500'
+                            : 'bg-rose-500'
+                        }`}
+                        style={{ width: `${(currentEvent.timeLeft / currentEvent.totalDuration) * 100}%` }}
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               <div className="flex-1 relative min-h-[400px]">
                 <GameCanvas
                   isPlaying={gameState === 'playing'}
@@ -283,6 +342,7 @@ export default function App() {
                   projectileModifier={projectileBonus}
                   setStats={setStats}
                   setPirateActive={setPirateActive}
+                  onEventTriggered={(evt) => setCurrentEvent(evt)}
                 />
 
                 {/* Pause Button */}
@@ -317,6 +377,7 @@ export default function App() {
                 upgrades={upgrades} 
                 minerals={minerals} 
                 onUpgrade={handleUpgrade} 
+                currentEvent={currentEvent}
               />
             </div>
           </div>

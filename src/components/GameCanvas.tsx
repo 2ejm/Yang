@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { GameStats, Laser, Meteor, Mineral, Particle, PirateShip, PlayerShip } from '../types';
+import { GameStats, Laser, Meteor, Mineral, Particle, PirateShip, PlayerShip, CosmicEvent, CosmicEventType, Blackhole } from '../types';
 import { sfx } from '../utils/audio';
 
 interface GameCanvasProps {
@@ -19,6 +19,7 @@ interface GameCanvasProps {
   projectileModifier: number;
   setStats: React.Dispatch<React.SetStateAction<GameStats>>;
   setPirateActive: (active: boolean) => void;
+  onEventTriggered: (event: CosmicEvent | null) => void;
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
@@ -38,6 +39,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   projectileModifier,
   setStats,
   setPirateActive,
+  onEventTriggered,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -70,6 +72,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const lasersRef = useRef<Laser[]>([]);
   const particlesRef = useRef<Particle[]>([]);
   const starsRef = useRef<{ x: number; y: number; size: number; alpha: number; speed: number }[]>([]);
+
+  // Event Engine states
+  const activeEventRef = useRef<CosmicEvent | null>(null);
+  const blackholeRef = useRef<Blackhole | null>(null);
+  const lastEventTriggerSecondRef = useRef<number>(0); 
 
   // Spawn Cooldown Timers
   const lastMeteorSpawnRef = useRef(0);
@@ -107,6 +114,36 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   useEffect(() => {
     playerRef.current.hp = shipHp;
   }, [shipHp]);
+
+  // Reset all engine systems when starting a fresh game session
+  useEffect(() => {
+    if (isPlaying) {
+      meteorsRef.current = [];
+      mineralsRef.current = [];
+      piratesRef.current = [];
+      lasersRef.current = [];
+      particlesRef.current = [];
+      activeEventRef.current = null;
+      blackholeRef.current = null;
+      lastEventTriggerSecondRef.current = 0;
+      lastMeteorSpawnRef.current = 0;
+      lastPirateSpawnRef.current = 0;
+      timeElapsedRef.current = 0;
+      statsTrackerRef.current = {
+        score: 0,
+        mineralsCollected: 0,
+        meteorsDestroyed: 0,
+        piratesDestroyed: 0,
+        timeSurvived: 0,
+      };
+      
+      const w = dimensions.width || 800;
+      const h = dimensions.height || 600;
+      playerRef.current.x = w / 2;
+      playerRef.current.y = h / 2;
+      playerRef.current.hp = 100 + maxHpModifier;
+    }
+  }, [isPlaying]);
 
   // Handle Resize beautifully
   useEffect(() => {
@@ -197,12 +234,23 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     let maxHpVal = 10;
     let type: 'common' | 'rare' | 'exotic' = 'common';
 
+    const isMeteorStorm = activeEventRef.current?.type === 'meteor_storm';
+
     if (radius > 35) {
       maxHpVal = 55;
       type = 'exotic';
     } else if (radius > 22) {
       maxHpVal = 25;
       type = 'rare';
+    }
+
+    // Upgrade loot drops significantly during storms
+    if (isMeteorStorm) {
+      if (type === 'common') {
+        type = 'rare';
+      } else if (type === 'rare') {
+        type = 'exotic';
+      }
     }
 
     let vx = 0;
@@ -215,16 +263,21 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const destX = w / 2 + (Math.random() * 300 - 150);
       const destY = h / 2 + (Math.random() * 300 - 150);
       const angle = Math.atan2(destY - mY, destX - mX);
-      const speed = Math.random() * 1.5 + 0.6;
+      
+      const speedMultiplier = isMeteorStorm ? 2.8 : 1.0;
+      const speed = (Math.random() * 1.5 + 0.6) * speedMultiplier;
       vx = Math.cos(angle) * speed;
       vy = Math.sin(angle) * speed;
     }
 
-    const colorSelection = type === 'exotic' 
-      ? '#c084fc' // Exotic purple
-      : type === 'rare' 
-      ? '#38bdf8' // Rare cyan
-      : '#94a3b8'; // Common metallic gray
+    // Burning ember or neon look during storms
+    const colorSelection = isMeteorStorm
+      ? (type === 'exotic' ? '#f43f5e' : '#f59e0b') // fiery visual theme
+      : (type === 'exotic'
+        ? '#c084fc' // Exotic purple
+        : type === 'rare'
+        ? '#38bdf8' // Rare cyan
+        : '#94a3b8'); // Common metallic gray
 
     meteorsRef.current.push({
       id: Math.random().toString(36).substring(2, 9),
@@ -236,7 +289,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       hp: maxHpVal,
       maxHp: maxHpVal,
       angle: Math.random() * Math.PI * 2,
-      rotationSpeed: (Math.random() * 0.03 - 0.015),
+      rotationSpeed: (Math.random() * 0.03 - 0.015) * (isMeteorStorm ? 2.5 : 1.0),
       color: colorSelection,
       mineralType: type,
       points: generateRuggedMeteorPoints(radius),
@@ -272,7 +325,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     });
   };
 
-  const spawnPirate = () => {
+  const spawnPirate = (isBoss: boolean = false) => {
     const w = dimensions.width;
     const h = dimensions.height;
     
@@ -296,21 +349,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       pY = Math.random() * h;
     }
 
+    const shockwaveParticles = isBoss ? 40 : 24;
     // Warp-in shockwave effect
-    for (let i = 0; i < 24; i++) {
-      const angle = (i / 24) * Math.PI * 2;
+    for (let i = 0; i < shockwaveParticles; i++) {
+      const angle = (i / shockwaveParticles) * Math.PI * 2;
       particlesRef.current.push({
         x: pX,
         y: pY,
-        vx: Math.cos(angle) * 3,
-        vy: Math.sin(angle) * 3,
+        vx: Math.cos(angle) * (isBoss ? 4.5 : 3),
+        vy: Math.sin(angle) * (isBoss ? 4.5 : 3),
         life: 0,
-        maxLife: 40,
-        size: 2,
-        color: '#f43f5e', // deep hacker pink/red
+        maxLife: isBoss ? 55 : 40,
+        size: isBoss ? 3 : 2,
+        color: isBoss ? '#e11d48' : '#f43f5e', // deep hacker pink/red
         type: 'spark',
       });
     }
+
+    const elapsed = statsTrackerRef.current.timeSurvived;
+    const hpMultiplier = 1 + elapsed * 0.003;
+    const baseHp = isBoss ? 250 : 80;
+    const mHp = baseHp * hpMultiplier;
 
     piratesRef.current.push({
       id: Math.random().toString(36).substring(2, 9),
@@ -318,12 +377,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       y: pY,
       vx: 0,
       vy: 0,
-      hp: 80 + statsTrackerRef.current.timeSurvived * 0.4, // scales nicely with survivals
-      maxHp: 80 + statsTrackerRef.current.timeSurvived * 0.4,
+      hp: mHp,
+      maxHp: mHp,
       angle: 0,
       lastFireTime: 0,
-      radius: 17,
-      fireCooldown: 1500, // 1.5s fire rates
+      radius: isBoss ? 26 : 17,
+      fireCooldown: isBoss ? 1000 : 1500, // 1.0s vs 1.5s fire rate
+      isBoss,
+      color: isBoss ? '#e11d48' : '#f43f5e',
+      damage: isBoss ? 22 : 12,
     });
 
     setPirateActive(true);
@@ -367,6 +429,69 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     isMouseInCanvasRef.current = true;
   };
 
+  const triggerRandomEvent = () => {
+    const eventsList: CosmicEventType[] = ['pirate_raid', 'space_market', 'meteor_storm', 'blackhole_anomaly'];
+    let nextType = eventsList[Math.floor(Math.random() * eventsList.length)];
+    
+    // Prevent double consecutive events of the same exact type
+    if (activeEventRef.current && activeEventRef.current.type === nextType) {
+      const filtered = eventsList.filter(t => t !== nextType);
+      nextType = filtered[Math.floor(Math.random() * filtered.length)];
+    }
+
+    let name = "";
+    let description = "";
+    const duration = 25; // active countdown of 25 seconds
+
+    // Wipe any existing blackhole
+    blackholeRef.current = null;
+
+    if (nextType === 'pirate_raid') {
+      name = "우주 해적 습격";
+      description = "전투 해적 함대가 차원 침투를 단행합니다! 엘리트 사령관선을 제압하고 레어 광석 수집 기회를 잡으세요.";
+      
+      const count = Math.min(5, 2 + Math.floor(statsTrackerRef.current.timeSurvived / 75));
+      for (let i = 0; i < count; i++) {
+        // First enemy is boss if time elapsed > 45s
+        const isBoss = i === 0 && statsTrackerRef.current.timeSurvived > 45;
+        spawnPirate(isBoss);
+      }
+    } else if (nextType === 'space_market') {
+      name = "성간 수송선 정박 (상점 개방)";
+      description = "성간 거상 정규 함선이 25초간 도킹합니다! 이 이벤트 지속 기간에만 선체 업그레이드가 허가됩니다.";
+      sfx.playUpgrade();
+    } else if (nextType === 'meteor_storm') {
+      name = "광폭 유성 폭퐁 지대 통과";
+      description = "유성 크기와 속도가 극한으로 치솟는 기류를 지납니다! 유성 파괴 시 획득하는 광석 지표 보상이 2배로 수직 급상승합니다.";
+      sfx.playPirateAlert();
+    } else if (nextType === 'blackhole_anomaly') {
+      name = "블랙홀 보이싱 특이점 발원";
+      description = "아레나 내에 시공 결속 블랙홀이 돌발 출현합니다! 함선과 잔해를 강하게 흡인하니 중심 피해 구역에서 이탈 제어하세요.";
+      sfx.playPirateAlert();
+      
+      const w = dimensions.width;
+      const h = dimensions.height;
+      blackholeRef.current = {
+        x: w / 2 + (Math.random() * 260 - 130),
+        y: h / 2 + (Math.random() * 200 - 100),
+        radius: 46,
+        pullForce: 0.9,
+        damagePerSec: 15, // DPS when boundary is crossed
+      };
+    }
+
+    const newEvent: CosmicEvent = {
+      type: nextType,
+      name,
+      description,
+      timeLeft: duration,
+      totalDuration: duration,
+    };
+
+    activeEventRef.current = newEvent;
+    onEventTriggered(newEvent);
+  };
+
   // The central engine update and rendering loop
   const gameLoop = (timestamp: number) => {
     if (isPaused || !isPlaying) return;
@@ -398,30 +523,62 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         });
       }
 
+      // --- Cosmic Events 60-Second Engine ---
+      if (activeEventRef.current) {
+        const nextTimeLeft = activeEventRef.current.timeLeft - 1;
+        if (nextTimeLeft <= 0) {
+          if (activeEventRef.current.type !== 'idle') {
+            const idleEvent: CosmicEvent = {
+              type: 'idle',
+              name: "시공 장막 안정화 (보안 진단 중)",
+              description: "차원 균열 현상이 완전 복구 복원되었습니다. 다음 이상 왜곡 영역 진입까지 1분의 안정 공간을 순항합니다.",
+              timeLeft: 60,
+              totalDuration: 60,
+            };
+            blackholeRef.current = null;
+            activeEventRef.current = idleEvent;
+            onEventTriggered(idleEvent);
+          } else {
+            triggerRandomEvent();
+          }
+        } else {
+          activeEventRef.current.timeLeft = nextTimeLeft;
+          onEventTriggered({ ...activeEventRef.current });
+        }
+      } else {
+        // First event starts after 60 seconds (1 minute) from the beginning
+        const initialIdleEvent: CosmicEvent = {
+          type: 'idle',
+          name: "차원 도약 준비 (장비 충전 중)",
+          description: "소형 전술 광석 수집 탐사선이 왜곡 시공간에 정상 도킹되었습니다. 60초 후 첫 우주 이상 기류가 인접합니다.",
+          timeLeft: 60,
+          totalDuration: 60,
+        };
+        activeEventRef.current = initialIdleEvent;
+        onEventTriggered(initialIdleEvent);
+      }
+
       // Add survival bonus score
       statsTrackerRef.current.score += 5;
       setStats({ ...statsTrackerRef.current });
     }
 
     // 1. Spawning schedules
-    const currentSpawnRate = Math.max(1200, 3200 - secondsSurvived * 12); // SPAWNS ACCELERATE AS TIME GOES!
+    const isMeteorStormActive = activeEventRef.current?.type === 'meteor_storm';
+    const stormSpawnMultiplier = isMeteorStormActive ? 0.28 : 1.0;
+    const currentSpawnRate = Math.max(380, (3200 - secondsSurvived * 12) * stormSpawnMultiplier); 
+    
     if (timestamp - lastMeteorSpawnRef.current > currentSpawnRate) {
       spawnMeteor();
-      // Occasionally double spawn!
-      if (Math.random() < 0.25) {
+      // Occasionally double spawn! (Increases up to 60% during storms for crazy hyper-dense grids)
+      if (Math.random() < (isMeteorStormActive ? 0.6 : 0.25)) {
         spawnMeteor();
       }
       lastMeteorSpawnRef.current = timestamp;
     }
 
-    // Spawn pirates occasionally
-    const pirateSpawnInterval = Math.max(12000, 24000 - secondsSurvived * 100);
-    if (timestamp - lastPirateSpawnRef.current > pirateSpawnInterval) {
-      if (piratesRef.current.length < 3) { // limit multi pirate chaos based on threat
-        spawnPirate();
-      }
-      lastPirateSpawnRef.current = timestamp;
-    }
+    // We no longer spawn random pirates automatically outside of events.
+    // Pirate spawning is now strictly handled via Cosmic Events (pirate_raid).
 
     // 2. Clear canvas
     ctx.fillStyle = '#020205'; // very sleek dark deep background
@@ -469,27 +626,37 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     let nearestEnemy: { id: string; x: number; y: number; hp: number; radius: number; isPirate: boolean } | null = null;
     let minEnemyDist = player.range;
 
-    // Check Meteors in weapons line
-    meteorsRef.current.forEach((m) => {
-      const dist = Math.hypot(m.x - player.x, m.y - player.y);
-      if (dist < minEnemyDist) {
-        minEnemyDist = dist;
-        nearestEnemy = { id: m.id, x: m.x, y: m.y, hp: m.hp, radius: m.radius, isPirate: false };
+    // Check Pirate Ships first (absolute priority)
+    let nearestPirate: PirateShip | null = null;
+    let minPirateDist = player.range + 80;
+    piratesRef.current.forEach((p) => {
+      const dist = Math.hypot(p.x - player.x, p.y - player.y);
+      if (dist < minPirateDist) {
+        minPirateDist = dist;
+        nearestPirate = p;
       }
     });
 
-    // Check Pirate Ships loaded (prioritize targeting aggressive Pirate Ships!)
-    piratesRef.current.forEach((p) => {
-      const dist = Math.hypot(p.x - player.x, p.y - player.y);
-      // Give pirates a small targeting advantage so player shoots pirates down first
-      if (dist < player.range + 80) {
-        const adjustedDist = dist * 0.7; // virtual discount for distance priority
-        if (adjustedDist < minEnemyDist) {
-          minEnemyDist = adjustedDist;
-          nearestEnemy = { id: p.id, x: p.x, y: p.y, hp: p.hp, radius: p.radius, isPirate: true };
+    if (nearestPirate) {
+      nearestEnemy = {
+        id: nearestPirate.id,
+        x: nearestPirate.x,
+        y: nearestPirate.y,
+        hp: nearestPirate.hp,
+        radius: nearestPirate.radius,
+        isPirate: true,
+      };
+      minEnemyDist = minPirateDist;
+    } else {
+      // Fall back to Meteors only if no pirates are around
+      meteorsRef.current.forEach((m) => {
+        const dist = Math.hypot(m.x - player.x, m.y - player.y);
+        if (dist < minEnemyDist) {
+          minEnemyDist = dist;
+          nearestEnemy = { id: m.id, x: m.x, y: m.y, hp: m.hp, radius: m.radius, isPirate: false };
         }
-      }
-    });
+      });
+    }
 
     if (nearestEnemy) {
       const ne: any = nearestEnemy;
@@ -509,6 +676,39 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const accelerationFactor = 0.08;
       player.x += dx * accelerationFactor * (player.speed / 5);
       player.y += dy * accelerationFactor * (player.speed / 5);
+    }
+
+    // --- Blackhole Gravitational Gravy Pull ---
+    if (blackholeRef.current) {
+      const bh = blackholeRef.current;
+      const distToBh = Math.hypot(bh.x - player.x, bh.y - player.y);
+      if (distToBh > 8) {
+        // Gravitational force decreases relative to distance (capped for fluid feel)
+        const gravitationalPull = Math.min(4.8, (280 / distToBh) * bh.pullForce);
+        player.x += ((bh.x - player.x) / distToBh) * gravitationalPull;
+        player.y += ((bh.y - player.y) / distToBh) * gravitationalPull;
+      }
+
+      // Check damage boundary (clashed inside dangerous gravity radius)
+      if (distToBh < bh.radius) {
+        const frameDmg = bh.damagePerSec / 60;
+        
+        // Sputter warnings and spark flares
+        if (Math.random() < 0.1) {
+          sfx.playDamage();
+        }
+        if (Math.random() < 0.35) {
+          spawnSparks(player.x, player.y, '#9333ea', 5, 2.5); // purple graviton sparks
+        }
+
+        setShipHp((prev) => {
+          const next = prev - frameDmg;
+          if (next <= 0) {
+            onGameOver();
+          }
+          return Math.max(0, next);
+        });
+      }
     }
 
     // Prevent ship moving out of boundary space
@@ -626,6 +826,38 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       m.y += m.vy;
       m.angle += m.rotationSpeed;
 
+      // --- Blackhole Gravity & Damage Pull on Meteors ---
+      if (blackholeRef.current) {
+        const bh = blackholeRef.current;
+        const distToBh = Math.hypot(bh.x - m.x, bh.y - m.y);
+        
+        if (distToBh < bh.radius) {
+          // Devoured & damaged by the blackhole!
+          const damageAmount = (bh.damagePerSec / 60) * 4.0; // heavy erosion DPS
+          m.hp -= damageAmount;
+          
+          if (Math.random() < 0.2) {
+            spawnSparks(m.x, m.y, '#a855f7', 3, 1.8);
+          }
+          
+          if (m.hp <= 0) {
+            sfx.playExplosion('meteor');
+            statsTrackerRef.current.meteorsDestroyed += 1;
+            statsTrackerRef.current.score += Math.round(m.radius * 2);
+            setStats({ ...statsTrackerRef.current });
+            
+            // Drop mineral
+            spawnMineral(m.x, m.y, m.mineralType);
+            return; // devoured completely, skip spawning/splitting
+          }
+        } else if (distToBh < bh.radius * 3.5) {
+          // Strong gravitate pull towards the center
+          const pullForce = Math.min(3.5, (160 / distToBh) * bh.pullForce);
+          m.vx += ((bh.x - m.x) / distToBh) * pullForce * 0.15;
+          m.vy += ((bh.y - m.y) / distToBh) * pullForce * 0.15;
+        }
+      }
+
       // Keep if within boundary viewport with margin
       const margin = 100;
       if (m.x > -margin && m.x < dimensions.width + margin && m.y > -margin && m.y < dimensions.height + margin) {
@@ -724,6 +956,39 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       pirate.x += pVx;
       pirate.y += pVy;
       pirate.angle = Math.atan2(pDy, pDx);
+
+      // --- Blackhole Gravity & Damage Pull on Pirates ---
+      if (blackholeRef.current) {
+        const bh = blackholeRef.current;
+        const distToBh = Math.hypot(bh.x - pirate.x, bh.y - pirate.y);
+        
+        if (distToBh < bh.radius) {
+          // Takes critical damage!
+          const damageAmount = (bh.damagePerSec / 60) * 4.5; // very high damage
+          pirate.hp -= damageAmount;
+          
+          if (Math.random() < 0.25) {
+            spawnSparks(pirate.x, pirate.y, '#c084fc', 4, 1.8);
+          }
+          
+          if (pirate.hp <= 0) {
+            sfx.playExplosion('pirate');
+            spawnSparks(pirate.x, pirate.y, pirate.color || '#f43f5e', 18, 3.5);
+            statsTrackerRef.current.piratesDestroyed += 1;
+            statsTrackerRef.current.score += 250; // give score
+            setStats({ ...statsTrackerRef.current });
+            
+            // Drop crystal
+            spawnMineral(pirate.x, pirate.y, pirate.isBoss ? 'exotic' : 'rare');
+            return; // completely devoured by singularity!
+          }
+        } else if (distToBh < bh.radius * 3.5) {
+          // Attracted to the event horizon
+          const pullForce = Math.min(3.5, (160 / distToBh) * bh.pullForce);
+          pirate.x += ((bh.x - pirate.x) / distToBh) * pullForce * 0.9;
+          pirate.y += ((bh.y - pirate.y) / distToBh) * pullForce * 0.9;
+        }
+      }
 
       // Firing triggers at player
       if (timestamp - pirate.lastFireTime > pirate.fireCooldown) {
@@ -886,6 +1151,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       min.x += min.vx;
       min.y += min.vy;
 
+      // -- Blackhole Gravitational Pull on Minerals --
+      if (blackholeRef.current) {
+        const bh = blackholeRef.current;
+        const distToBh = Math.hypot(bh.x - min.x, bh.y - min.y);
+        
+        if (distToBh < bh.radius * 4.0) {
+          // Strong pull proportional to proximity
+          const pullForce = Math.min(5.5, (110 / distToBh) * bh.pullForce);
+          min.vx += ((bh.x - min.x) / distToBh) * pullForce * 0.35;
+          min.vy += ((bh.y - min.y) / distToBh) * pullForce * 0.35;
+        }
+
+        // Vaporize minerals if they hit the pitch-black core center
+        if (distToBh < bh.radius * 0.4) {
+          if (Math.random() < 0.2) {
+            spawnSparks(min.x, min.y, '#a855f7', 3, 1.2);
+          }
+          return; // swallowed by black hole! don't push to nextMinerals
+        }
+      }
+
       const dist = Math.hypot(min.x - player.x, min.y - player.y);
 
       // Tractor magnetic grab
@@ -931,6 +1217,56 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     // --- DRAWING PORTION SFX LINES ---
     
+    // Draw Cosmic Blackhole Anomaly if active
+    if (blackholeRef.current) {
+      const bh = blackholeRef.current;
+      ctx.save();
+      
+      // Accretion Disk pulsing animation
+      const pulseRadius = bh.radius + Math.sin(timestamp * 0.006) * 4;
+      
+      const grad = ctx.createRadialGradient(bh.x, bh.y, bh.radius * 0.25, bh.x, bh.y, pulseRadius * 2.2);
+      grad.addColorStop(0, '#000000'); // total core dark
+      grad.addColorStop(0.2, '#7e22ce'); // hot purple accretion boundary
+      grad.addColorStop(0.5, 'rgba(139, 92, 246, 0.4)'); // electric violet nebula
+      grad.addColorStop(1, 'rgba(168, 85, 247, 0)'); // fade context
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(bh.x, bh.y, pulseRadius * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Swirling core rings to symbolize rotational inertial fields
+      ctx.strokeStyle = '#c084fc';
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([12, 18]);
+      ctx.beginPath();
+      ctx.arc(bh.x, bh.y, bh.radius * 1.3, timestamp * 0.002, timestamp * 0.002 + Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#a78bfa';
+      ctx.lineWidth = 2.0;
+      ctx.setLineDash([20, 24]);
+      ctx.beginPath();
+      ctx.arc(bh.x, bh.y, bh.radius * 1.6, -timestamp * 0.0016, -timestamp * 0.0016 + Math.PI * 2);
+      ctx.stroke();
+
+      // Flat pitch-black core singularity
+      ctx.fillStyle = '#010103';
+      ctx.beginPath();
+      ctx.arc(bh.x, bh.y, bh.radius * 0.75, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Glowing Event Horizon contour
+      ctx.strokeStyle = '#ea580c'; // fiery gravity warping orange light refraction ring
+      ctx.shadowColor = '#ea580c';
+      ctx.shadowBlur = 8;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
     // Draw Minerals
     mineralsRef.current.forEach((min) => {
       ctx.beginPath();

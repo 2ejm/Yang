@@ -67,6 +67,9 @@ export interface PirateShip {
   lastFireTime: number;
   radius: number;
   fireCooldown: number; // ms
+  isBoss?: boolean;
+  color?: string;
+  damage?: number;
 }
 
 export interface Laser {
@@ -100,3 +103,22 @@ export interface GameStats {
   piratesDestroyed: number;
   timeSurvived: number; // seconds
 }
+
+export type CosmicEventType = 'idle' | 'pirate_raid' | 'space_market' | 'meteor_storm' | 'blackhole_anomaly';
+
+export interface CosmicEvent {
+  type: CosmicEventType;
+  name: string;
+  description: string;
+  timeLeft: number; // seconds left
+  totalDuration: number; // total duration
+}
+
+export interface Blackhole {
+  x: number;
+  y: number;
+  radius: number;
+  pullForce: number;
+  damagePerSec: number;
+}
+
