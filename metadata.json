@@ -1,6 +1,6 @@
 {
-  "name": "Cosmic Drifter",
-  "description": "마우스로 조종하여 우주 먼지와 유성을 채굴하고, 습격해오는 외계 해적에 침착히 맞서며 우주선을 점진적으로 강화해나가는 고품격 생존 슈팅 아케이드 게임",
+  "name": "양 목장 디펜스 (양덤디)",
+  "description": "양 목장에 습격해오는 늑대 무리를 막아내는 고품격 전략 랜덤 디펜스 게임입니다. 인컴 양을 모아 골드 생산량을 높이고, 다양한 공격 타입의 양들을 뽑고 합성(3마리)하여 몰려드는 늑대로부터 마지막 울타리를 지켜내세요!",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

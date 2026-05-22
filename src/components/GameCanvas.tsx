@@ -1,151 +1,87 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { GameStats, Laser, Meteor, Mineral, Particle, PirateShip, PlayerShip, CosmicEvent, CosmicEventType, Blackhole } from '../types';
+import { GameStats, DefenseUpgrades, SheepUnit, SheepType, GoldSheepUnit, Wolf, Projectile, Particle } from '../types';
 import { sfx } from '../utils/audio';
 
 interface GameCanvasProps {
+  stats: GameStats;
+  setStats: React.Dispatch<React.SetStateAction<GameStats>>;
+  upgrades: DefenseUpgrades;
+  sheepUnits: SheepUnit[];
+  setSheepUnits: React.Dispatch<React.SetStateAction<SheepUnit[]>>;
+  selectedSlotIdx: number | null;
+  setSelectedSlotIdx: (idx: number | null) => void;
   isPlaying: boolean;
   isPaused: boolean;
   onGameOver: () => void;
-  onMineralsCollected: (amount: number) => void;
-  shipHp: number;
-  setShipHp: React.Dispatch<React.SetStateAction<number>>;
-  maxHpModifier: number;
-  regenModifier: number;
-  damageModifier: number;
-  fireRateModifier: number;
-  rangeModifier: number;
-  speedModifier: number;
-  magnetModifier: number;
-  projectileModifier: number;
-  setStats: React.Dispatch<React.SetStateAction<GameStats>>;
-  setPirateActive: (active: boolean) => void;
-  onEventTriggered: (event: CosmicEvent | null) => void;
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
+  stats,
+  setStats,
+  upgrades,
+  sheepUnits,
+  setSheepUnits,
+  selectedSlotIdx,
+  setSelectedSlotIdx,
   isPlaying,
   isPaused,
   onGameOver,
-  onMineralsCollected,
-  shipHp,
-  setShipHp,
-  maxHpModifier,
-  regenModifier,
-  damageModifier,
-  fireRateModifier,
-  rangeModifier,
-  speedModifier,
-  magnetModifier,
-  projectileModifier,
-  setStats,
-  setPirateActive,
-  onEventTriggered,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // High frequency tracking state using refs for buttery 60fps canvas performance
+  // High FPS physics refs
+  const frameIdRef = useRef<number | null>(null);
+  const dimensionsRef = useRef({ width: 800, height: 550 });
+  const [dimensions, setDimensions] = useState({ width: 800, height: 550 });
+
+  // Entity Lists
+  const wolvesRef = useRef<Wolf[]>([]);
+  const projectilesRef = useRef<Projectile[]>([]);
+  const goldSheepsRef = useRef<GoldSheepUnit[]>([]);
+  const particlesRef = useRef<Particle[]>([]);
+
+  // Timers and spawn controllers
+  const lastStateUpdateSecRef = useRef<number>(0);
+  const wolfSpawnTimerRef = useRef<number>(0); // countdown in ms to next wolf spawn
+  const incomeTimerRef = useRef<number>(0); // timer in ms for periodic gold income payout
+
+  // Track mouse coordinates for slot highlight
   const mouseRef = useRef({ x: 0, y: 0 });
   const isMouseInCanvasRef = useRef(false);
-  const frameIdRef = useRef<number | null>(null);
 
-  // Entities
-  const playerRef = useRef<PlayerShip>({
-    x: 400,
-    y: 300,
-    angle: 0,
-    hp: 100,
-    maxHp: 100,
-    regen: 0,
-    speed: 5,
-    damage: 10,
-    fireRate: 2,
-    lastFireTime: 0,
-    range: 200,
-    magnet: 80,
-    projectileCount: 1,
-  });
+  // Grid offsets & geometric spacing
+  const gridConfig = {
+    rowCount: 4,
+    colCount: 4,
+    slotSize: 62,
+    gap: 12,
+    xOffset: 50,
+    yOffset: 160,
+  };
 
-  const meteorsRef = useRef<Meteor[]>([]);
-  const mineralsRef = useRef<Mineral[]>([]);
-  const piratesRef = useRef<PirateShip[]>([]);
-  const lasersRef = useRef<Laser[]>([]);
-  const particlesRef = useRef<Particle[]>([]);
-  const starsRef = useRef<{ x: number; y: number; size: number; alpha: number; speed: number }[]>([]);
+  // Convert slot index (0-15) to pasture 2D coordinates (X, Y center)
+  const getSlotCoord = (idx: number) => {
+    const row = Math.floor(idx / gridConfig.colCount);
+    const col = idx % gridConfig.colCount;
+    const x = gridConfig.xOffset + col * (gridConfig.slotSize + gridConfig.gap) + gridConfig.slotSize / 2;
+    const y = gridConfig.yOffset + row * (gridConfig.slotSize + gridConfig.gap) + gridConfig.slotSize / 2;
+    return { x, y };
+  };
 
-  // Event Engine states
-  const activeEventRef = useRef<CosmicEvent | null>(null);
-  const blackholeRef = useRef<Blackhole | null>(null);
-  const lastEventTriggerSecondRef = useRef<number>(0); 
-
-  // Spawn Cooldown Timers
-  const lastMeteorSpawnRef = useRef(0);
-  const lastPirateSpawnRef = useRef(0);
-  const timeElapsedRef = useRef(0); // overall seconds elapsed
-  const statsTrackerRef = useRef<GameStats>({
-    score: 0,
-    mineralsCollected: 0,
-    meteorsDestroyed: 0,
-    piratesDestroyed: 0,
-    timeSurvived: 0,
-  });
-
-  // Track resizing
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-
-  // Synced upgrades application (inject modifications inside game loop immediately)
-  useEffect(() => {
-    playerRef.current.maxHp = 100 + maxHpModifier;
-    playerRef.current.regen = regenModifier;
-    playerRef.current.damage = 10 + damageModifier;
-    playerRef.current.fireRate = 2 + fireRateModifier * 0.5; // increases shot speed
-    playerRef.current.range = 200 + rangeModifier;
-    playerRef.current.speed = 5 + speedModifier * 0.7;
-    playerRef.current.magnet = 80 + magnetModifier;
-    playerRef.current.projectileCount = 1 + projectileModifier;
-
-    // Adjust HP up if maxHp has grown
-    if (shipHp > playerRef.current.maxHp) {
-      setShipHp(playerRef.current.maxHp);
+  // Find slot index from coordinates (returns null if not in a slot)
+  const getSlotIndexFromCoord = (x: number, y: number) => {
+    for (let i = 0; i < 16; i++) {
+      const coord = getSlotCoord(i);
+      const dist = Math.hypot(x - coord.x, y - coord.y);
+      if (dist < gridConfig.slotSize / 2 + 2) {
+        return i;
+      }
     }
-  }, [maxHpModifier, regenModifier, damageModifier, fireRateModifier, rangeModifier, speedModifier, magnetModifier, projectileModifier]);
+    return null;
+  };
 
-  // Adjust local hp ref when component prop changes
-  useEffect(() => {
-    playerRef.current.hp = shipHp;
-  }, [shipHp]);
-
-  // Reset all engine systems when starting a fresh game session
-  useEffect(() => {
-    if (isPlaying) {
-      meteorsRef.current = [];
-      mineralsRef.current = [];
-      piratesRef.current = [];
-      lasersRef.current = [];
-      particlesRef.current = [];
-      activeEventRef.current = null;
-      blackholeRef.current = null;
-      lastEventTriggerSecondRef.current = 0;
-      lastMeteorSpawnRef.current = 0;
-      lastPirateSpawnRef.current = 0;
-      timeElapsedRef.current = 0;
-      statsTrackerRef.current = {
-        score: 0,
-        mineralsCollected: 0,
-        meteorsDestroyed: 0,
-        piratesDestroyed: 0,
-        timeSurvived: 0,
-      };
-      
-      const w = dimensions.width || 800;
-      const h = dimensions.height || 600;
-      playerRef.current.x = w / 2;
-      playerRef.current.y = h / 2;
-      playerRef.current.hp = 100 + maxHpModifier;
-    }
-  }, [isPlaying]);
-
-  // Handle Resize beautifully
+  // Sync dimensions and initialize Golden Sheep backyard roster
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -153,263 +89,137 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         const w = width || 800;
-        const h = height || 600;
+        const h = height || 550;
+        dimensionsRef.current = { width: w, height: h };
         setDimensions({ width: w, height: h });
-
-        // Relocate player to center on first load setup
-        if (playerRef.current.x === 400 && playerRef.current.y === 300) {
-          playerRef.current.x = w / 2;
-          playerRef.current.y = h / 2;
-        }
       }
     });
 
     resizeObserver.observe(containerRef.current);
-
-    // Initialize starry field
-    const stars = [];
-    const starCount = 120;
-    for (let i = 0; i < starCount; i++) {
-      stars.push({
-        x: Math.random() * 1200,
-        y: Math.random() * 900,
-        size: Math.random() * 2 + 0.5,
-        alpha: Math.random() * 0.5 + 0.3,
-        speed: Math.random() * 0.15 + 0.05,
-      });
-    }
-    starsRef.current = stars;
 
     return () => {
       resizeObserver.disconnect();
     };
   }, []);
 
-  // Helper spawn builders
-  const generateRuggedMeteorPoints = (radius: number): { x: number; y: number }[] => {
-    const points = [];
-    const minPoints = 8;
-    const maxPoints = 12;
-    const numPoints = Math.floor(Math.random() * (maxPoints - minPoints + 1)) + minPoints;
-
-    for (let i = 0; i < numPoints; i++) {
-      const angle = (i / numPoints) * Math.PI * 2;
-      const variation = (Math.random() * 0.4 - 0.2) * radius; // 20% ruggedness
-      points.push({
-        x: Math.cos(angle) * (radius + variation),
-        y: Math.sin(angle) * (radius + variation),
-      });
+  // Set up golden sheep when goldSheepCount property changes in parent React state
+  useEffect(() => {
+    const diff = stats.goldSheepCount - goldSheepsRef.current.length;
+    if (diff > 0) {
+      // Add missing gold sheep
+      for (let i = 0; i < diff; i++) {
+        goldSheepsRef.current.push({
+          id: Math.random().toString(36).substring(2, 9),
+          x: 60 + Math.random() * 260,
+          y: 35 + Math.random() * 60,
+          vx: (Math.random() * 0.4 - 0.2),
+          vy: (Math.random() * 0.3 - 0.15),
+          isChewing: false,
+          chewTimer: 0,
+          flipX: Math.random() > 0.5,
+        });
+      }
+    } else if (diff < 0) {
+      // Shink list
+      goldSheepsRef.current = goldSheepsRef.current.slice(0, stats.goldSheepCount);
     }
-    return points;
-  };
+  }, [stats.goldSheepCount]);
 
-  const spawnMeteor = (x?: number, y?: number, customRadius?: number, customVel?: { vx: number; vy: number }) => {
-    const w = dimensions.width;
-    const h = dimensions.height;
-    
-    // Choose spawn position (edge of screen unless custom coordinate is fed)
-    let mX = 0;
-    let mY = 0;
-    if (x !== undefined && y !== undefined) {
-      mX = x;
-      mY = y;
-    } else {
-      const edge = Math.floor(Math.random() * 4);
-      if (edge === 0) { // Top
-        mX = Math.random() * w;
-        mY = -50;
-      } else if (edge === 1) { // Right
-        mX = w + 50;
-        mY = Math.random() * h;
-      } else if (edge === 2) { // Bottom
-        mX = Math.random() * w;
-        mY = h + 50;
-      } else { // Left
-        mX = -50;
-        mY = Math.random() * h;
+  // Restart everything on game start
+  useEffect(() => {
+    if (isPlaying) {
+      wolvesRef.current = [];
+      projectilesRef.current = [];
+      particlesRef.current = [];
+      wolfSpawnTimerRef.current = 1000; // spawn first wolf very quickly
+      incomeTimerRef.current = 5000; // first income in 5 seconds
+      lastStateUpdateSecRef.current = 0;
+
+      // Reset Gold Sheep Units
+      goldSheepsRef.current = [];
+      for (let i = 0; i < stats.goldSheepCount; i++) {
+        goldSheepsRef.current.push({
+          id: Math.random().toString(36).substring(2, 9),
+          x: 60 + Math.random() * 260,
+          y: 35 + Math.random() * 60,
+          vx: (Math.random() * 0.4 - 0.2),
+          vy: (Math.random() * 0.3 - 0.15),
+          isChewing: false,
+          chewTimer: 0,
+          flipX: Math.random() > 0.5,
+        });
       }
     }
+  }, [isPlaying]);
 
-    const radius = customRadius || (Math.random() * 32 + 10); // sizes 10px to 42px
-    let maxHpVal = 10;
-    let type: 'common' | 'rare' | 'exotic' = 'common';
+  // Handle Canvas Interaction clicks
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isPlaying || isPaused) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
 
-    const isMeteorStorm = activeEventRef.current?.type === 'meteor_storm';
+    const clickedSlotIdx = getSlotIndexFromCoord(clickX, clickY);
 
-    if (radius > 35) {
-      maxHpVal = 55;
-      type = 'exotic';
-    } else if (radius > 22) {
-      maxHpVal = 25;
-      type = 'rare';
-    }
+    if (clickedSlotIdx !== null) {
+      const sheepInClickedSlot = sheepUnits.find((u) => u.slotIdx === clickedSlotIdx);
 
-    // Upgrade loot drops significantly during storms
-    if (isMeteorStorm) {
-      if (type === 'common') {
-        type = 'rare';
-      } else if (type === 'rare') {
-        type = 'exotic';
+      // If we clicked a pasture slot:
+      if (selectedSlotIdx === null) {
+        // First selection behavior: select slot if a sheep sits there
+        if (sheepInClickedSlot) {
+          setSelectedSlotIdx(clickedSlotIdx);
+          sfx.playBaa(1.1); // friendly bleat
+        }
+      } else {
+        // Second selection behavior: we already have a selected sheep
+        const selectedSheepUnit = sheepUnits.find((u) => u.slotIdx === selectedSlotIdx);
+
+        if (selectedSheepUnit) {
+          if (clickedSlotIdx === selectedSlotIdx) {
+            // Deselect on clicking the same unit
+            setSelectedSlotIdx(null);
+          } else if (!sheepInClickedSlot) {
+            // Move sheep to empty slot!
+            const coords = getSlotCoord(clickedSlotIdx);
+            const updatedUnits = sheepUnits.map((u) => {
+              if (u.slotIdx === selectedSlotIdx) {
+                return { ...u, slotIdx: clickedSlotIdx, x: coords.x, y: coords.y };
+              }
+              return u;
+            });
+            setSheepUnits(updatedUnits);
+            setSelectedSlotIdx(null);
+            sfx.playShoot('normal'); // move sound
+          } else {
+            // Swapping sheep units! Or selecting the other sheep unit
+            const coordsTarget = getSlotCoord(clickedSlotIdx);
+            const coordsSource = getSlotCoord(selectedSlotIdx);
+            const updatedUnits = sheepUnits.map((u) => {
+              if (u.slotIdx === selectedSlotIdx) {
+                return { ...u, slotIdx: clickedSlotIdx, x: coordsTarget.x, y: coordsTarget.y };
+              }
+              if (u.slotIdx === clickedSlotIdx) {
+                return { ...u, slotIdx: selectedSlotIdx, x: coordsSource.x, y: coordsSource.y };
+              }
+              return u;
+            });
+            setSheepUnits(updatedUnits);
+            setSelectedSlotIdx(null);
+            sfx.playShoot('normal');
+          }
+        } else {
+          setSelectedSlotIdx(null);
+        }
       }
-    }
-
-    let vx = 0;
-    let vy = 0;
-    if (customVel) {
-      vx = customVel.vx;
-      vy = customVel.vy;
     } else {
-      // Point towards center sector with variance
-      const destX = w / 2 + (Math.random() * 300 - 150);
-      const destY = h / 2 + (Math.random() * 300 - 150);
-      const angle = Math.atan2(destY - mY, destX - mX);
-      
-      const speedMultiplier = isMeteorStorm ? 2.8 : 1.0;
-      const speed = (Math.random() * 1.5 + 0.6) * speedMultiplier;
-      vx = Math.cos(angle) * speed;
-      vy = Math.sin(angle) * speed;
-    }
-
-    // Burning ember or neon look during storms
-    const colorSelection = isMeteorStorm
-      ? (type === 'exotic' ? '#f43f5e' : '#f59e0b') // fiery visual theme
-      : (type === 'exotic'
-        ? '#c084fc' // Exotic purple
-        : type === 'rare'
-        ? '#38bdf8' // Rare cyan
-        : '#94a3b8'); // Common metallic gray
-
-    meteorsRef.current.push({
-      id: Math.random().toString(36).substring(2, 9),
-      x: mX,
-      y: mY,
-      vx,
-      vy,
-      radius,
-      hp: maxHpVal,
-      maxHp: maxHpVal,
-      angle: Math.random() * Math.PI * 2,
-      rotationSpeed: (Math.random() * 0.03 - 0.015) * (isMeteorStorm ? 2.5 : 1.0),
-      color: colorSelection,
-      mineralType: type,
-      points: generateRuggedMeteorPoints(radius),
-    });
-  };
-
-  const spawnMineral = (x: number, y: number, type: 'common' | 'rare' | 'exotic') => {
-    let color = '#facc15'; // yellow/common
-    let val = 1;
-
-    if (type === 'rare') {
-      color = '#0ea5e9'; // rare blue
-      val = 3;
-    } else if (type === 'exotic') {
-      color = '#e879f9'; // exotic pink/violet
-      val = 8;
-    }
-
-    // Give crystal a slight explosive pop out direction
-    const popAngle = Math.random() * Math.PI * 2;
-    const popSpeed = Math.random() * 1.2 + 0.5;
-
-    mineralsRef.current.push({
-      id: Math.random().toString(36).substring(2, 9),
-      x,
-      y,
-      vx: Math.cos(popAngle) * popSpeed,
-      vy: Math.sin(popAngle) * popSpeed,
-      value: val,
-      type,
-      color,
-      collected: false,
-    });
-  };
-
-  const spawnPirate = (isBoss: boolean = false) => {
-    const w = dimensions.width;
-    const h = dimensions.height;
-    
-    // Warp-in warning sound
-    sfx.playPirateAlert();
-
-    const edge = Math.floor(Math.random() * 4);
-    let pX = 0;
-    let pY = 0;
-    if (edge === 0) {
-      pX = Math.random() * w;
-      pY = -60;
-    } else if (edge === 1) {
-      pX = w + 60;
-      pY = Math.random() * h;
-    } else if (edge === 2) {
-      pX = Math.random() * w;
-      pY = h + 60;
-    } else {
-      pX = -60;
-      pY = Math.random() * h;
-    }
-
-    const shockwaveParticles = isBoss ? 40 : 24;
-    // Warp-in shockwave effect
-    for (let i = 0; i < shockwaveParticles; i++) {
-      const angle = (i / shockwaveParticles) * Math.PI * 2;
-      particlesRef.current.push({
-        x: pX,
-        y: pY,
-        vx: Math.cos(angle) * (isBoss ? 4.5 : 3),
-        vy: Math.sin(angle) * (isBoss ? 4.5 : 3),
-        life: 0,
-        maxLife: isBoss ? 55 : 40,
-        size: isBoss ? 3 : 2,
-        color: isBoss ? '#e11d48' : '#f43f5e', // deep hacker pink/red
-        type: 'spark',
-      });
-    }
-
-    const elapsed = statsTrackerRef.current.timeSurvived;
-    const hpMultiplier = 1 + elapsed * 0.003;
-    const baseHp = isBoss ? 250 : 80;
-    const mHp = baseHp * hpMultiplier;
-
-    piratesRef.current.push({
-      id: Math.random().toString(36).substring(2, 9),
-      x: pX,
-      y: pY,
-      vx: 0,
-      vy: 0,
-      hp: mHp,
-      maxHp: mHp,
-      angle: 0,
-      lastFireTime: 0,
-      radius: isBoss ? 26 : 17,
-      fireCooldown: isBoss ? 1000 : 1500, // 1.0s vs 1.5s fire rate
-      isBoss,
-      color: isBoss ? '#e11d48' : '#f43f5e',
-      damage: isBoss ? 22 : 12,
-    });
-
-    setPirateActive(true);
-  };
-
-  const spawnSparks = (x: number, y: number, color: string, count: number = 8, averageSpeed: number = 2.5) => {
-    for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * averageSpeed + 0.5;
-      particlesRef.current.push({
-        x,
-        y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        life: 0,
-        maxLife: Math.random() * 25 + 15,
-        size: Math.random() * 2.5 + 1,
-        color,
-        type: 'spark',
-      });
+      // Clicked outside pasture: deselect
+      setSelectedSlotIdx(null);
     }
   };
 
-  // Keyboard/Mouse handling
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -421,1114 +231,1236 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     isMouseInCanvasRef.current = true;
   };
 
-  const handleMouseLeave = () => {
-    isMouseInCanvasRef.current = false;
+  // Helper Spark generator
+  const spawnParticles = (
+    x: number, 
+    y: number, 
+    color: string, 
+    count: number = 8, 
+    type: Particle['type'] = 'spark',
+    avgSpeed: number = 2.0
+  ) => {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = Math.random() * avgSpeed + 0.6;
+      particlesRef.current.push({
+        id: Math.random().toString(36).substring(2, 9),
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 0,
+        maxLife: Math.random() * 20 + 15,
+        size: Math.random() * 3 + 1,
+        color,
+        type,
+        opacity: 1,
+      });
+    }
   };
 
-  const handleMouseEnter = () => {
-    isMouseInCanvasRef.current = true;
-  };
+  // Spawns wolf based on wave level
+  const spawnWolf = (waveNum: number) => {
+    const w = dimensionsRef.current.width;
 
-  const triggerRandomEvent = () => {
-    const eventsList: CosmicEventType[] = ['pirate_raid', 'space_market', 'meteor_storm', 'blackhole_anomaly'];
-    let nextType = eventsList[Math.floor(Math.random() * eventsList.length)];
+    // Create a group pack size that scales with wave progression
+    const packSize = Math.max(1, Math.min(6, Math.floor(1 + (waveNum - 1) * 0.45)));
     
-    // Prevent double consecutive events of the same exact type
-    if (activeEventRef.current && activeEventRef.current.type === nextType) {
-      const filtered = eventsList.filter(t => t !== nextType);
-      nextType = filtered[Math.floor(Math.random() * filtered.length)];
+    // Softer HP scaling for swarms to be clean and satisfying to wipe out!
+    const baseHp = Math.round(30 * Math.pow(1.16, waveNum - 1) + (waveNum - 1) * 5);
+    const size = Math.min(26, 12 + waveNum * 0.7); // size increase
+    const speed = Math.min(2.1, 0.65 + waveNum * 0.08); // speed scaling
+    const fenceDmg = 5 + waveNum * 1.5; // bite severity
+
+    for (let i = 0; i < packSize; i++) {
+      const spawnX = w + 20 + i * (25 + Math.random() * 20); // slightly staggered
+      const spawnY = 150 + Math.random() * (dimensionsRef.current.height - 210);
+
+      wolvesRef.current.push({
+        id: Math.random().toString(36).substring(2, 9),
+        x: spawnX,
+        y: spawnY,
+        maxHp: baseHp,
+        hp: baseHp,
+        speed: speed * (0.9 + Math.random() * 0.2), // slight random speed variation
+        baseSpeed: speed,
+        size,
+        damage: fenceDmg,
+        waveNum,
+        slowTimer: 0,
+        poisonTimer: 0,
+        poisonDmg: 0,
+        attackCooldown: 1000, // bite every 1.0s
+        lastAttackTime: 0,
+      });
     }
-
-    let name = "";
-    let description = "";
-    const duration = 25; // active countdown of 25 seconds
-
-    // Wipe any existing blackhole
-    blackholeRef.current = null;
-
-    if (nextType === 'pirate_raid') {
-      name = "우주 해적 습격";
-      description = "전투 해적 함대가 차원 침투를 단행합니다! 엘리트 사령관선을 제압하고 레어 광석 수집 기회를 잡으세요.";
-      
-      const count = Math.min(5, 2 + Math.floor(statsTrackerRef.current.timeSurvived / 75));
-      for (let i = 0; i < count; i++) {
-        // First enemy is boss if time elapsed > 45s
-        const isBoss = i === 0 && statsTrackerRef.current.timeSurvived > 45;
-        spawnPirate(isBoss);
-      }
-    } else if (nextType === 'space_market') {
-      name = "성간 수송선 정박 (상점 개방)";
-      description = "성간 거상 정규 함선이 25초간 도킹합니다! 이 이벤트 지속 기간에만 선체 업그레이드가 허가됩니다.";
-      sfx.playUpgrade();
-    } else if (nextType === 'meteor_storm') {
-      name = "광폭 유성 폭퐁 지대 통과";
-      description = "유성 크기와 속도가 극한으로 치솟는 기류를 지납니다! 유성 파괴 시 획득하는 광석 지표 보상이 2배로 수직 급상승합니다.";
-      sfx.playPirateAlert();
-    } else if (nextType === 'blackhole_anomaly') {
-      name = "블랙홀 보이싱 특이점 발원";
-      description = "아레나 내에 시공 결속 블랙홀이 돌발 출현합니다! 함선과 잔해를 강하게 흡인하니 중심 피해 구역에서 이탈 제어하세요.";
-      sfx.playPirateAlert();
-      
-      const w = dimensions.width;
-      const h = dimensions.height;
-      blackholeRef.current = {
-        x: w / 2 + (Math.random() * 260 - 130),
-        y: h / 2 + (Math.random() * 200 - 100),
-        radius: 46,
-        pullForce: 0.9,
-        damagePerSec: 15, // DPS when boundary is crossed
-      };
-    }
-
-    const newEvent: CosmicEvent = {
-      type: nextType,
-      name,
-      description,
-      timeLeft: duration,
-      totalDuration: duration,
-    };
-
-    activeEventRef.current = newEvent;
-    onEventTriggered(newEvent);
   };
 
-  // The central engine update and rendering loop
-  const gameLoop = (timestamp: number) => {
+  // The physics and drawing loop
+  const performGameStep = (timestamp: number) => {
     if (isPaused || !isPlaying) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) {
-      frameIdRef.current = requestAnimationFrame(gameLoop);
+      frameIdRef.current = requestAnimationFrame(performGameStep);
       return;
     }
 
-    // Time elapsed ticking
-    if (!lastMeteorSpawnRef.current) lastMeteorSpawnRef.current = timestamp;
-    if (!lastPirateSpawnRef.current) lastPirateSpawnRef.current = timestamp;
+    const w = dimensionsRef.current.width;
+    const h = dimensionsRef.current.height;
+    const deltaMs = 16.66; // 60 FPS approx
 
-    const deltaSecs = 1 / 60; // 0.016 approx
-    timeElapsedRef.current += deltaSecs;
+    // ----------------------------------------------------
+    // PHYSICS GAUGE & COUNTER TICK (Once per second)
+    // ----------------------------------------------------
+    const curSecond = Math.floor(timestamp / 1000);
+    if (curSecond !== lastStateUpdateSecRef.current) {
+      lastStateUpdateSecRef.current = curSecond;
 
-    // Throttle score and ticker state updates back to parent to avoid severe React layout thrashing
-    const secondsSurvived = Math.floor(timeElapsedRef.current);
-    if (secondsSurvived !== statsTrackerRef.current.timeSurvived) {
-      statsTrackerRef.current.timeSurvived = secondsSurvived;
-      
-      // Auto-Regen TICK
-      if (playerRef.current.regen > 0 && playerRef.current.hp < playerRef.current.maxHp) {
-        setShipHp((prev) => {
-          const next = prev + playerRef.current.regen;
-          return Math.min(playerRef.current.maxHp, next);
-        });
-      }
+      // 1. Tick Wave duration timer
+      setStats((prev) => {
+        let nextTimer = prev.waveTimeLeft - 1;
+        let nextWaveNum = prev.waveNum;
+        let nextScores = prev.score + 1; // survival points
 
-      // --- Cosmic Events 60-Second Engine ---
-      if (activeEventRef.current) {
-        const nextTimeLeft = activeEventRef.current.timeLeft - 1;
-        if (nextTimeLeft <= 0) {
-          if (activeEventRef.current.type !== 'idle') {
-            const idleEvent: CosmicEvent = {
-              type: 'idle',
-              name: "시공 장막 안정화 (보안 진단 중)",
-              description: "차원 균열 현상이 완전 복구 복원되었습니다. 다음 이상 왜곡 영역 진입까지 1분의 안정 공간을 순항합니다.",
-              timeLeft: 60,
-              totalDuration: 60,
-            };
-            blackholeRef.current = null;
-            activeEventRef.current = idleEvent;
-            onEventTriggered(idleEvent);
-          } else {
-            triggerRandomEvent();
+        if (nextTimer <= 0) {
+          nextWaveNum += 1;
+          nextTimer = prev.waveTotalDuration;
+          
+          // Trigger alarm
+          sfx.playWaveAlert();
+          
+          // Trigger floating banner/text particle
+          spawnParticles(w / 2, h / 2, '#38bdf8', 35, 'rep', 3.5);
+        }
+
+        // Apply automatic Fence HP regeneration if upgraded
+        let nextFenceHp = prev.fenceHp;
+        if (upgrades.fenceRegenLevel > 0 && nextFenceHp < prev.fenceMaxHp) {
+          const regenVal = upgrades.fenceRegenLevel * 3; // +3 hp per sec per lvl
+          nextFenceHp = Math.min(prev.fenceMaxHp, nextFenceHp + regenVal);
+          
+          // Sparkly green sparkles on the wall to show self-repair
+          if (nextFenceHp > prev.fenceHp) {
+            spawnParticles(420, 100 + Math.random() * (h - 150), '#10b981', 3, 'rep', 1);
           }
-        } else {
-          activeEventRef.current.timeLeft = nextTimeLeft;
-          onEventTriggered({ ...activeEventRef.current });
         }
-      } else {
-        // First event starts after 60 seconds (1 minute) from the beginning
-        const initialIdleEvent: CosmicEvent = {
-          type: 'idle',
-          name: "차원 도약 준비 (장비 충전 중)",
-          description: "소형 전술 광석 수집 탐사선이 왜곡 시공간에 정상 도킹되었습니다. 60초 후 첫 우주 이상 기류가 인접합니다.",
-          timeLeft: 60,
-          totalDuration: 60,
+
+        return {
+          ...prev,
+          waveTimeLeft: nextTimer,
+          waveNum: nextWaveNum,
+          score: nextScores,
+          fenceHp: nextFenceHp,
         };
-        activeEventRef.current = initialIdleEvent;
-        onEventTriggered(initialIdleEvent);
-      }
-
-      // Add survival bonus score
-      statsTrackerRef.current.score += 5;
-      setStats({ ...statsTrackerRef.current });
-    }
-
-    // 1. Spawning schedules
-    const isMeteorStormActive = activeEventRef.current?.type === 'meteor_storm';
-    const stormSpawnMultiplier = isMeteorStormActive ? 0.28 : 1.0;
-    const currentSpawnRate = Math.max(380, (3200 - secondsSurvived * 12) * stormSpawnMultiplier); 
-    
-    if (timestamp - lastMeteorSpawnRef.current > currentSpawnRate) {
-      spawnMeteor();
-      // Occasionally double spawn! (Increases up to 60% during storms for crazy hyper-dense grids)
-      if (Math.random() < (isMeteorStormActive ? 0.6 : 0.25)) {
-        spawnMeteor();
-      }
-      lastMeteorSpawnRef.current = timestamp;
-    }
-
-    // We no longer spawn random pirates automatically outside of events.
-    // Pirate spawning is now strictly handled via Cosmic Events (pirate_raid).
-
-    // 2. Clear canvas
-    ctx.fillStyle = '#020205'; // very sleek dark deep background
-    ctx.fillRect(0, 0, dimensions.width, dimensions.height);
-
-    // 3. Render and drift background stars
-    ctx.shadowBlur = 0;
-    starsRef.current.forEach((star) => {
-      // Drifts star space backdrop slowly downwards right
-      star.y += star.speed;
-      star.x += star.speed * 0.3;
-      if (star.y > dimensions.height) {
-        star.y = -5;
-        star.x = Math.random() * dimensions.width;
-      }
-      if (star.x > dimensions.width) {
-        star.x = -5;
-      }
-
-      ctx.fillStyle = `rgba(255, 255, 255, ${star.alpha})`;
-      ctx.fillRect(star.x, star.y, star.size, star.size);
-    });
-
-    // 4. Update and move Player ship
-    const player = playerRef.current;
-    
-    // Follow mouse smoothly (inertial damping)
-    let targetX = mouseRef.current.x;
-    let targetY = mouseRef.current.y;
-
-    // If mouse is outside, float spaceship slightly centered
-    if (!isMouseInCanvasRef.current) {
-      targetX = dimensions.width / 2;
-      targetY = dimensions.height / 2;
-    }
-
-    const dx = targetX - player.x;
-    const dy = targetY - player.y;
-    const distMouse = Math.hypot(dx, dy);
-
-    // Dynamic rotation angle - points towards lock on enemy if firing, otherwise points towards moving direction
-    let targetAngle = player.angle;
-
-    // Search nearest enemy inside Auto-Attack range
-    let nearestEnemy: { id: string; x: number; y: number; hp: number; radius: number; isPirate: boolean } | null = null;
-    let minEnemyDist = player.range;
-
-    // Check Pirate Ships first (absolute priority)
-    let nearestPirate: PirateShip | null = null;
-    let minPirateDist = player.range + 80;
-    piratesRef.current.forEach((p) => {
-      const dist = Math.hypot(p.x - player.x, p.y - player.y);
-      if (dist < minPirateDist) {
-        minPirateDist = dist;
-        nearestPirate = p;
-      }
-    });
-
-    if (nearestPirate) {
-      nearestEnemy = {
-        id: nearestPirate.id,
-        x: nearestPirate.x,
-        y: nearestPirate.y,
-        hp: nearestPirate.hp,
-        radius: nearestPirate.radius,
-        isPirate: true,
-      };
-      minEnemyDist = minPirateDist;
-    } else {
-      // Fall back to Meteors only if no pirates are around
-      meteorsRef.current.forEach((m) => {
-        const dist = Math.hypot(m.x - player.x, m.y - player.y);
-        if (dist < minEnemyDist) {
-          minEnemyDist = dist;
-          nearestEnemy = { id: m.id, x: m.x, y: m.y, hp: m.hp, radius: m.radius, isPirate: false };
-        }
       });
     }
 
-    if (nearestEnemy) {
-      const ne: any = nearestEnemy;
-      targetAngle = Math.atan2(ne.y - player.y, ne.x - player.x);
-    } else if (distMouse > 15) {
-      targetAngle = Math.atan2(dy, dx);
-    }
+    // ----------------------------------------------------
+    // INCOMS (Resource Sheep Periodic payout ticks)
+    // ----------------------------------------------------
+    incomeTimerRef.current -= deltaMs;
+    if (incomeTimerRef.current <= 0) {
+      incomeTimerRef.current = 5000; // pay income every 5 seconds
 
-    // Interpolate angle for smooth rotating ship maneuvers
-    const angleDiff = targetAngle - player.angle;
-    // Normalize to -PI to PI
-    const normalDiff = Math.atan2(Math.sin(angleDiff), Math.cos(angleDiff));
-    player.angle += normalDiff * 0.18;
+      const incomeValue = stats.goldSheepCount * 12; // 12G per gold sheep
+      if (incomeValue > 0) {
+        setStats((prev) => ({ ...prev, gold: prev.gold + incomeValue, score: prev.score + incomeValue * 2 }));
+        sfx.playCoin();
 
-    if (distMouse > 10) {
-      // Accelerate towards coordinates
-      const accelerationFactor = 0.08;
-      player.x += dx * accelerationFactor * (player.speed / 5);
-      player.y += dy * accelerationFactor * (player.speed / 5);
-    }
-
-    // --- Blackhole Gravitational Gravy Pull ---
-    if (blackholeRef.current) {
-      const bh = blackholeRef.current;
-      const distToBh = Math.hypot(bh.x - player.x, bh.y - player.y);
-      if (distToBh > 8) {
-        // Gravitational force decreases relative to distance (capped for fluid feel)
-        const gravitationalPull = Math.min(4.8, (280 / distToBh) * bh.pullForce);
-        player.x += ((bh.x - player.x) / distToBh) * gravitationalPull;
-        player.y += ((bh.y - player.y) / distToBh) * gravitationalPull;
-      }
-
-      // Check damage boundary (clashed inside dangerous gravity radius)
-      if (distToBh < bh.radius) {
-        const frameDmg = bh.damagePerSec / 60;
-        
-        // Sputter warnings and spark flares
-        if (Math.random() < 0.1) {
-          sfx.playDamage();
-        }
-        if (Math.random() < 0.35) {
-          spawnSparks(player.x, player.y, '#9333ea', 5, 2.5); // purple graviton sparks
-        }
-
-        setShipHp((prev) => {
-          const next = prev - frameDmg;
-          if (next <= 0) {
-            onGameOver();
-          }
-          return Math.max(0, next);
+        // Emit massive coin particles on all gold sheep!
+        goldSheepsRef.current.forEach((gs) => {
+          spawnParticles(gs.x, gs.y - 10, '#fbbf24', 5, 'gold_coin', 1.8);
         });
       }
     }
 
-    // Prevent ship moving out of boundary space
-    player.x = Math.max(20, Math.min(dimensions.width - 20, player.x));
-    player.y = Math.max(20, Math.min(dimensions.height - 20, player.y));
+    // ----------------------------------------------------
+    // WOLVES SPAWN TICKER
+    // ----------------------------------------------------
+    wolfSpawnTimerRef.current -= deltaMs;
+    if (wolfSpawnTimerRef.current <= 0) {
+      // Spawn next wolf swarm pack
+      spawnWolf(stats.waveNum);
 
-    // 5. Weapon automatic bullet triggers (Automatic shoots nearest)
-    if (nearestEnemy) {
-      const fireIntervalMs = 1000 / player.fireRate;
-      if (timestamp - player.lastFireTime > fireIntervalMs) {
-        sfx.playLaser(false);
-
-        const targetEntity: any = nearestEnemy;
-        const angleToEnemy = Math.atan2(targetEntity.y - player.y, targetEntity.x - player.x);
-        
-        // Multi gun setups!
-        if (player.projectileCount === 1) {
-          // One center laser
-          lasersRef.current.push({
-            id: Math.random().toString(36).substring(2, 9),
-            x: player.x,
-            y: player.y,
-            vx: Math.cos(angleToEnemy) * 11,
-            vy: Math.sin(angleToEnemy) * 11,
-            damage: player.damage,
-            isEnemy: false,
-            angle: angleToEnemy,
-            radius: 3.5,
-          });
-        } 
-        else if (player.projectileCount === 2) {
-          // Dual wide spread lasers (parallel offsets)
-          const offsetAngle1 = angleToEnemy - 0.12;
-          const offsetAngle2 = angleToEnemy + 0.12;
-          
-          [offsetAngle1, offsetAngle2].forEach((ang) => {
-            lasersRef.current.push({
-              id: Math.random().toString(36).substring(2, 9),
-              x: player.x + Math.cos(ang) * 10,
-              y: player.y + Math.sin(ang) * 10,
-              vx: Math.cos(ang) * 11,
-              vy: Math.sin(ang) * 11,
-              damage: player.damage,
-              isEnemy: false,
-              angle: ang,
-              radius: 3.5,
-            });
-          });
-        } 
-        else if (player.projectileCount === 3) {
-          // Triple fan spreading
-          const spreadAngs = [angleToEnemy - 0.22, angleToEnemy, angleToEnemy + 0.22];
-          spreadAngs.forEach((ang) => {
-            lasersRef.current.push({
-              id: Math.random().toString(36).substring(2, 9),
-              x: player.x,
-              y: player.y,
-              vx: Math.cos(ang) * 11,
-              vy: Math.sin(ang) * 11,
-              damage: player.damage,
-              isEnemy: false,
-              angle: ang,
-              radius: 3.5,
-            });
-          });
-        } 
-        else if (player.projectileCount === 4) {
-          // 4-Way Cross burst around the spaceship pointing at locked target primarily
-          const baseAngles = [
-            angleToEnemy,
-            angleToEnemy + Math.PI / 2,
-            angleToEnemy + Math.PI,
-            angleToEnemy - Math.PI / 2
-          ];
-          baseAngles.forEach((ang) => {
-            lasersRef.current.push({
-              id: Math.random().toString(36).substring(2, 9),
-              x: player.x,
-              y: player.y,
-              vx: Math.cos(ang) * 11,
-              vy: Math.sin(ang) * 11,
-              damage: player.damage * 0.9, // tiny scaling down for count balance
-              isEnemy: false,
-              angle: ang,
-              radius: 4,
-            });
-          });
-        }
-        else {
-          // Level 5: 360-degree Nova shockwaves! 6 heavy lasers shooting outward circle
-          for (let i = 0; i < 6; i++) {
-            const ang = angleToEnemy + (i * Math.PI) / 3;
-            lasersRef.current.push({
-              id: Math.random().toString(36).substring(2, 9),
-              x: player.x,
-              y: player.y,
-              vx: Math.cos(ang) * 11,
-              vy: Math.sin(ang) * 11,
-              damage: player.damage * 0.85,
-              isEnemy: false,
-              angle: ang,
-              radius: 4,
-            });
-          }
-        }
-
-        player.lastFireTime = timestamp;
-      }
+      // Set cooldown: significantly reduced wait time for a swarming feel
+      const minSpawnRate = 900;
+      const baseSpawnRate = 3800;
+      wolfSpawnTimerRef.current = Math.max(minSpawnRate, baseSpawnRate - stats.waveNum * 180 - Math.random() * 1200);
     }
 
-    // 6. Update, check, split METEORS
-    const nextMeteors: Meteor[] = [];
-    meteorsRef.current.forEach((m) => {
-      m.x += m.vx;
-      m.y += m.vy;
-      m.angle += m.rotationSpeed;
-
-      // --- Blackhole Gravity & Damage Pull on Meteors ---
-      if (blackholeRef.current) {
-        const bh = blackholeRef.current;
-        const distToBh = Math.hypot(bh.x - m.x, bh.y - m.y);
-        
-        if (distToBh < bh.radius) {
-          // Devoured & damaged by the blackhole!
-          const damageAmount = (bh.damagePerSec / 60) * 4.0; // heavy erosion DPS
-          m.hp -= damageAmount;
-          
-          if (Math.random() < 0.2) {
-            spawnSparks(m.x, m.y, '#a855f7', 3, 1.8);
-          }
-          
-          if (m.hp <= 0) {
-            sfx.playExplosion('meteor');
-            statsTrackerRef.current.meteorsDestroyed += 1;
-            statsTrackerRef.current.score += Math.round(m.radius * 2);
-            setStats({ ...statsTrackerRef.current });
-            
-            // Drop mineral
-            spawnMineral(m.x, m.y, m.mineralType);
-            return; // devoured completely, skip spawning/splitting
-          }
-        } else if (distToBh < bh.radius * 3.5) {
-          // Strong gravitate pull towards the center
-          const pullForce = Math.min(3.5, (160 / distToBh) * bh.pullForce);
-          m.vx += ((bh.x - m.x) / distToBh) * pullForce * 0.15;
-          m.vy += ((bh.y - m.y) / distToBh) * pullForce * 0.15;
+    // ----------------------------------------------------
+    // PHYSICS: WANDERING RESURCE SHEEP
+    // ----------------------------------------------------
+    goldSheepsRef.current.forEach((gs) => {
+      if (gs.isChewing) {
+        gs.chewTimer -= deltaMs;
+        if (gs.chewTimer <= 0) {
+          gs.isChewing = false;
+          // select new random velocity vector
+          const moveAngle = Math.random() * Math.PI * 2;
+          const moveSpeed = 0.15 + Math.random() * 0.25;
+          gs.vx = Math.cos(moveAngle) * moveSpeed;
+          gs.vy = Math.sin(moveAngle) * moveSpeed;
+          gs.flipX = gs.vx < 0;
         }
-      }
-
-      // Keep if within boundary viewport with margin
-      const margin = 100;
-      if (m.x > -margin && m.x < dimensions.width + margin && m.y > -margin && m.y < dimensions.height + margin) {
-        
-        // Collsion check with Player ship
-        const shipDist = Math.hypot(m.x - player.x, m.y - player.y);
-        const colLimit = m.radius + 15; // ship average radius 15
-        
-        if (shipDist < colLimit) {
-          // BOUNCE and REDUCE HP!
-          const pushX = (player.x - m.x) / shipDist;
-          const pushY = (player.y - m.y) / shipDist;
-          
-          // Shove player back slightly
-          player.x += pushX * 12;
-          player.y += pushY * 12;
-
-          // Damage proportional to size of meteor
-          const dmg = Math.round(m.radius * 0.55);
-          sfx.playDamage();
-          
-          // Spawn collision sparks/rocks
-          spawnSparks(player.x - pushX * 15, player.y - pushY * 15, '#94a3b8', 12, 3);
-
-          setShipHp((prev) => {
-            const result = prev - dmg;
-            if (result <= 0) {
-              onGameOver();
-            }
-            return Math.max(0, result);
-          });
-
-          // Meteor takes instant crash damage
-          m.hp -= 20;
-          if (m.hp <= 0) {
-            // Shatter this meteor
-            sfx.playExplosion('meteor');
-            statsTrackerRef.current.meteorsDestroyed += 1;
-            statsTrackerRef.current.score += Math.round(m.radius * 2);
-            setStats({ ...statsTrackerRef.current });
-
-            // Drop Mineral
-            spawnMineral(m.x, m.y, m.mineralType);
-
-            // Split mechanics!
-            if (m.radius > 35) {
-              // splits into 2 medium meteors
-              const splRadius = 24;
-              spawnMeteor(m.x, m.y, splRadius, { vx: m.vx + m.vy * 0.4, vy: m.vy - m.vx * 0.4 });
-              spawnMeteor(m.x, m.y, splRadius, { vx: m.vx - m.vy * 0.4, vy: m.vy + m.vx * 0.4 });
-            } else if (m.radius > 22) {
-              // splits into 3 small meteors
-              const splRadius = 12;
-              spawnMeteor(m.x, m.y, splRadius, { vx: m.vx + 0.5, vy: m.vy - 0.5 });
-              spawnMeteor(m.x, m.y, splRadius, { vx: m.vx - 0.5, vy: m.vy + 0.5 });
-              spawnMeteor(m.x, m.y, splRadius, { vx: -m.vx * 0.8, vy: -m.vy * 0.8 });
-            }
-            return; // don't push into next list
-          }
-        }
-
-        nextMeteors.push(m);
-      }
-    });
-    meteorsRef.current = nextMeteors;
-
-    // 7. Update, check ALIEN PIRATE ships
-    const nextPirates: PirateShip[] = [];
-    piratesRef.current.forEach((pirate) => {
-      // Simple Follow AI: steer towards player ship
-      const pDx = player.x - pirate.x;
-      const pDy = player.y - pirate.y;
-      const pDist = Math.hypot(pDx, pDy);
-
-      let pVx = 0;
-      let pVy = 0;
-
-      // Keep comfortable distance from player (drifting/strafing) while firing
-      const desiredRange = 250;
-      const pirateSpeed = 1.9;
-
-      if (pDist > desiredRange + 40) {
-        // Move closer
-        pVx = (pDx / pDist) * pirateSpeed;
-        pVy = (pDy / pDist) * pirateSpeed;
-      } else if (pDist < desiredRange - 40) {
-        // Retreat back
-        pVx = -(pDx / pDist) * pirateSpeed;
-        pVy = -(pDy / pDist) * pirateSpeed;
       } else {
-        // Orbit/Strafe
-        pVx = (-pDy / pDist) * pirateSpeed * 0.6;
-        pVy = (pDx / pDist) * pirateSpeed * 0.6;
+        gs.x += gs.vx;
+        gs.y += gs.vy;
+
+        // Backyard fence boundary checks: x from 40 to 350, y from 15 to 110
+        if (gs.x < 40 || gs.x > 350 || gs.y < 15 || gs.y > 110) {
+          // steer back
+          const angleToCenter = Math.atan2(60 - gs.y, 200 - gs.x);
+          const moveSpeed = 0.2;
+          gs.vx = Math.cos(angleToCenter) * moveSpeed;
+          gs.vy = Math.sin(angleToCenter) * moveSpeed;
+          gs.flipX = gs.vx < 0;
+        }
+
+        // Probability of chewing grass
+        if (Math.random() < 0.003) {
+          gs.isChewing = true;
+          gs.chewTimer = 1000 + Math.random() * 2000;
+          gs.vx = 0;
+          gs.vy = 0;
+        }
       }
+    });
 
-      pirate.x += pVx;
-      pirate.y += pVy;
-      pirate.angle = Math.atan2(pDy, pDx);
+    // ----------------------------------------------------
+    // PHYSICS: HOSTILE WOLF PACKS RUNNING & BITING
+    // ----------------------------------------------------
+    const nextWolves: Wolf[] = [];
+    wolvesRef.current.forEach((wolf) => {
+      const fenceX = 420; // x line of our wall
 
-      // --- Blackhole Gravity & Damage Pull on Pirates ---
-      if (blackholeRef.current) {
-        const bh = blackholeRef.current;
-        const distToBh = Math.hypot(bh.x - pirate.x, bh.y - pirate.y);
-        
-        if (distToBh < bh.radius) {
-          // Takes critical damage!
-          const damageAmount = (bh.damagePerSec / 60) * 4.5; // very high damage
-          pirate.hp -= damageAmount;
-          
-          if (Math.random() < 0.25) {
-            spawnSparks(pirate.x, pirate.y, '#c084fc', 4, 1.8);
-          }
-          
-          if (pirate.hp <= 0) {
-            sfx.playExplosion('pirate');
-            spawnSparks(pirate.x, pirate.y, pirate.color || '#f43f5e', 18, 3.5);
-            statsTrackerRef.current.piratesDestroyed += 1;
-            statsTrackerRef.current.score += 250; // give score
-            setStats({ ...statsTrackerRef.current });
-            
-            // Drop crystal
-            spawnMineral(pirate.x, pirate.y, pirate.isBoss ? 'exotic' : 'rare');
-            return; // completely devoured by singularity!
-          }
-        } else if (distToBh < bh.radius * 3.5) {
-          // Attracted to the event horizon
-          const pullForce = Math.min(3.5, (160 / distToBh) * bh.pullForce);
-          pirate.x += ((bh.x - pirate.x) / distToBh) * pullForce * 0.9;
-          pirate.y += ((bh.y - pirate.y) / distToBh) * pullForce * 0.9;
+      // Manage Status durations
+      if (wolf.slowTimer > 0) {
+        wolf.slowTimer -= deltaMs;
+        wolf.speed = wolf.baseSpeed * 0.45; // slowed to 45%
+        if (wolf.slowTimer <= 0) {
+          wolf.speed = wolf.baseSpeed;
         }
       }
 
-      // Firing triggers at player
-      if (timestamp - pirate.lastFireTime > pirate.fireCooldown) {
-        // Spawn menacing red laser beam
-        sfx.playLaser(true);
-        lasersRef.current.push({
-          id: Math.random().toString(36).substring(2, 9),
-          x: pirate.x,
-          y: pirate.y,
-          vx: (pDx / pDist) * 7.5,
-          vy: (pDy / pDist) * 7.5,
-          damage: 15,
-          isEnemy: true,
-          angle: pirate.angle,
-          radius: 4,
-        });
-        pirate.lastFireTime = timestamp;
+      if (wolf.poisonTimer > 0) {
+        wolf.poisonTimer -= deltaMs;
+        // Do DOT damage
+        const dotTickValue = (wolf.poisonDmg / 60); // damage per frame
+        wolf.hp -= dotTickValue;
+        
+        // Spawn green poison particles
+        if (Math.random() < 0.06) {
+          spawnParticles(wolf.x, wolf.y, '#a21caf', 2, 'toxic', 0.8);
+        }
       }
 
-      // Crash into player check
-      if (pDist < pirate.radius + 15) {
-        sfx.playDamage();
-        sfx.playExplosion('pirate');
-        
-        // Hurt player severely
-        setShipHp((prev) => {
-          const next = prev - 30;
-          if (next <= 0) onGameOver();
-          return Math.max(0, next);
-        });
-
-        // Pirate shatters instantly
-        spawnSparks(pirate.x, pirate.y, '#f43f5e', 20, 4);
-        statsTrackerRef.current.piratesDestroyed += 1;
-        setStats({ ...statsTrackerRef.current });
-        
-        // Spawn 3 gorgeous minerals
-        spawnMineral(pirate.x, pirate.y, 'rare');
-        spawnMineral(pirate.x + 10, pirate.y, 'exotic');
-        spawnMineral(pirate.x, pirate.y + 10, 'rare');
-        return;
+      // Check if dead from Poison DOT or previous damage
+      if (wolf.hp <= 0) {
+        // Wolf dies!
+        sfx.playHit('normal');
+        spawnParticles(wolf.x, wolf.y, '#4b5563', 8, 'spark', 1.5);
+        setStats((prev) => ({
+          ...prev,
+          wolvesDefeated: prev.wolvesDefeated + 1,
+          gold: prev.gold + (5 + wolf.waveNum), // reward gold on wolf death!
+          score: prev.score + wolf.waveNum * 15,
+        }));
+        return; // drop wolf from next list
       }
 
-      // Filter check
-      nextPirates.push(pirate);
+      const reachWall = (wolf.x - wolf.size) <= fenceX;
+
+      if (!reachWall) {
+        // Move towards the left fence!
+        wolf.x -= wolf.speed;
+      } else {
+        // Arrive at fence! Force lock position
+        wolf.x = fenceX + wolf.size;
+
+        // Perform biting attacks on fence!
+        const curTime = timestamp;
+        if (curTime - wolf.lastAttackTime > wolf.attackCooldown) {
+          wolf.lastAttackTime = curTime;
+          sfx.playFenceDamage();
+          spawnParticles(fenceX, wolf.y, '#d97706', 4, 'spark', 1.8);
+
+          // Deduct fence health
+          setStats((prev) => {
+            const nextHp = prev.fenceHp - wolf.damage;
+            if (nextHp <= 0) {
+              // Game over triggers!
+              setTimeout(() => onGameOver(), 10);
+            }
+            return {
+              ...prev,
+              fenceHp: Math.max(0, nextHp),
+            };
+          });
+        }
+      }
+
+      nextWolves.push(wolf);
     });
-    piratesRef.current = nextPirates;
+    wolvesRef.current = nextWolves;
 
-    // Update Banner state
-    if (piratesRef.current.length === 0) {
-      setPirateActive(false);
+    // ----------------------------------------------------
+    // SHEEP FIRE SELECTION ENGINE
+    // ----------------------------------------------------
+    sheepUnits.forEach((sheep) => {
+      // Rates based on Tiers: faster firing on Tier 3!
+      // Tier 1: 1000ms, Tier 2: 800ms, Tier 3: 550ms
+      const fireCoold = Math.max(400, 1100 - sheep.tier * 200);
+      const rightNow = timestamp;
+
+      if (rightNow - sheep.lastShotTime > fireCoold) {
+        // Identify target wolf
+        // Defense sheep ONLY target wolves in their line of sight/range
+        // Because wolves are only on the right, sheep on the left shoot rightward
+        let bestTarget: Wolf | null = null;
+        let minDistanceValue = 400 + sheep.tier * 100; // max shoot range gets scaled on Tier
+
+        wolvesRef.current.forEach((w) => {
+          const dst = Math.hypot(w.x - sheep.x, w.y - sheep.y);
+          if (dst < minDistanceValue) {
+            minDistanceValue = dst;
+            bestTarget = w;
+          }
+        });
+
+        if (bestTarget) {
+          const wolf: Wolf = bestTarget;
+          sfx.playShoot(sheep.type);
+          sheep.lastShotTime = rightNow;
+
+          // Calculate Damage based on Type upgrades!
+          let baseTypeDmg = 15;
+          let upgradeMultPercent = 100;
+
+          if (sheep.type === 'normal') {
+            baseTypeDmg = 16;
+            upgradeMultPercent = 100 + upgrades.normalAtkLevel * 15;
+          } else if (sheep.type === 'fire') {
+            baseTypeDmg = 14;
+            upgradeMultPercent = 100 + upgrades.fireAtkLevel * 15;
+          } else if (sheep.type === 'freeze') {
+            baseTypeDmg = 10;
+            upgradeMultPercent = 100 + upgrades.freezeSlowLevel * 10;
+          } else if (sheep.type === 'lightning') {
+            baseTypeDmg = 9;
+            upgradeMultPercent = 100 + upgrades.lightningAtkLevel * 15;
+          } else if (sheep.type === 'poison') {
+            baseTypeDmg = 6;
+            upgradeMultPercent = 100 + upgrades.poisonAtkLevel * 15;
+          }
+
+          // Tier boosts damage exponentially!
+          // Tier 1: x1, Tier 2: x3.2, Tier 3: x10
+          const tierScale = sheep.tier === 1 ? 1 : sheep.tier === 2 ? 3.2 : 10;
+          const finalDamage = Math.round(baseTypeDmg * (upgradeMultPercent / 100) * tierScale);
+
+          // Find shooting angle vector
+          const shootAngle = Math.atan2(wolf.y - sheep.y, wolf.x - sheep.x);
+          const bulletSpeed = 9;
+
+          projectilesRef.current.push({
+            id: Math.random().toString(36).substring(2, 9),
+            type: sheep.type,
+            tier: sheep.tier,
+            x: sheep.x,
+            y: sheep.y,
+            vx: Math.cos(shootAngle) * bulletSpeed,
+            vy: Math.sin(shootAngle) * bulletSpeed,
+            targetWolfId: wolf.id,
+            damage: finalDamage,
+            speed: bulletSpeed,
+            splashRadius: sheep.type === 'fire' ? (50 + sheep.tier * 20) : undefined,
+          });
+        }
+      }
+    });
+
+    // ----------------------------------------------------
+    // PHYSICS: PROJECTILES PROPAGATING & IMPACT
+    // ----------------------------------------------------
+    const nextProjectiles: Projectile[] = [];
+    projectilesRef.current.forEach((proj) => {
+      // Find track wolf
+      const targetWolf = wolvesRef.current.find((w) => w.id === proj.targetWolfId);
+
+      if (targetWolf) {
+        // Homing bullet adjustments!
+        const dX = targetWolf.x - proj.x;
+        const dY = targetWolf.y - proj.y;
+        const dDist = Math.hypot(dX, dY);
+
+        if (dDist > 12) {
+          // Adjust velocity vectors
+          proj.vx = (dX / dDist) * proj.speed;
+          proj.vy = (dY / dDist) * proj.speed;
+          
+          // Propagate
+          proj.x += proj.vx;
+          proj.y += proj.vy;
+          
+          nextProjectiles.push(proj);
+        } else {
+          // Collided with target wolf! Execute element mechanics
+          executeBulletImpact(proj, targetWolf);
+        }
+      } else {
+        // Target is dead. Homing turns to straight propagation
+        proj.x += proj.vx;
+        proj.y += proj.vy;
+
+        // If hits any other wolf, crack it!
+        let hasHitAny = false;
+        for (let i = 0; i < wolvesRef.current.length; i++) {
+          const w = wolvesRef.current[i];
+          const dist = Math.hypot(w.x - proj.x, w.y - proj.y);
+          if (dist < w.size) {
+            executeBulletImpact(proj, w);
+            hasHitAny = true;
+            break;
+          }
+        }
+
+        // Keep inside bounds if did not crash yet
+        if (!hasHitAny && proj.x > 0 && proj.x < w && proj.y > 0 && proj.y < h) {
+          nextProjectiles.push(proj);
+        }
+      }
+    });
+    projectilesRef.current = nextProjectiles;
+
+    // Bullet impact handler helper
+    function executeBulletImpact(proj: Projectile, wolf: Wolf) {
+      sfx.playHit(proj.type);
+
+      if (proj.type === 'normal') {
+        wolf.hp -= proj.damage;
+        // grey fluffy wool particles
+        spawnParticles(wolf.x, wolf.y, '#f1f5f9', 5, 'fleece', 1.2);
+      } 
+      else if (proj.type === 'fire') {
+        // Fire splash explosion damages ALL wolves in circle
+        const radius = proj.splashRadius || 60;
+        
+        // Spawn massive fire plume particles
+        spawnParticles(proj.x, proj.y, '#f97316', 15, 'ember', 2.5);
+        sfx.playHit('fire');
+
+        wolvesRef.current.forEach((w) => {
+          const splDist = Math.hypot(w.x - proj.x, w.y - proj.y);
+          if (splDist < radius) {
+            // damages proportional to center distance:
+            const intensity = 1.0 - (splDist / (radius * 1.2));
+            const splDmg = Math.round(proj.damage * Math.max(0.4, intensity));
+            w.hp -= splDmg;
+            
+            // tiny red text/amber flare
+            if (Math.random() < 0.2) {
+              spawnParticles(w.x, w.y, '#ef4444', 3, 'ember', 0.8);
+            }
+          }
+        });
+      } 
+      else if (proj.type === 'freeze') {
+        wolf.hp -= proj.damage;
+        // Freeze slow timer: 2.5s base, scales up on level
+        const slowMs = 2500 + upgrades.freezeSlowLevel * 150;
+        wolf.slowTimer = Math.max(wolf.slowTimer, slowMs);
+        
+        // Blue icy sparkles
+        spawnParticles(wolf.x, wolf.y, '#38bdf8', 6, 'ice', 1.5);
+        sfx.playHit('freeze');
+      } 
+      else if (proj.type === 'lightning') {
+        wolf.hp -= proj.damage;
+        spawnParticles(wolf.x, wolf.y, '#facc15', 5, 'zap', 2.0);
+
+        // Chain Lightning jumps to 2-4 alternative nearby wolves!
+        const maxChains = proj.tier === 1 ? 2 : proj.tier === 2 ? 3 : 5;
+        let chainTargetIds = [wolf.id];
+        let currentChainWolf = wolf;
+
+        for (let i = 0; i < maxChains; i++) {
+          let nextChainWolf: Wolf | null = null;
+          let minChainDist = 140; // chain jumping distance
+
+          for (let j = 0; j < wolvesRef.current.length; j++) {
+            const w = wolvesRef.current[j];
+            if (chainTargetIds.includes(w.id)) continue;
+
+            const chainDist = Math.hypot(w.x - currentChainWolf.x, w.y - currentChainWolf.y);
+            if (chainDist < minChainDist) {
+              minChainDist = chainDist;
+              nextChainWolf = w;
+            }
+          }
+
+          if (nextChainWolf) {
+            // Add chain connection lines drawing!
+            // In canvas, we can push connection particle lines
+            particlesRef.current.push({
+              id: Math.random().toString(36).substring(2, 9),
+              x: currentChainWolf.x,
+              y: currentChainWolf.y,
+              vx: nextChainWolf.x, // carry target coordinate for vector lines drawing!
+              vy: nextChainWolf.y,
+              life: 0,
+              maxLife: 6, // flashes instantly
+              size: 2,
+              color: '#fbbf24',
+              type: 'zap',
+            });
+
+            // Deal chain damage: slightly decaying
+            const chainDmg = Math.round(proj.damage * 0.82);
+            nextChainWolf.hp -= chainDmg;
+            spawnParticles(nextChainWolf.x, nextChainWolf.y, '#fbbf24', 2, 'zap', 1.2);
+            
+            chainTargetIds.push(nextChainWolf.id);
+            currentChainWolf = nextChainWolf;
+          } else {
+            break; // no other wolves near
+          }
+        }
+      } 
+      else if (proj.type === 'poison') {
+        wolf.hp -= proj.damage;
+        // Poison DOT parameters: ticks every 500ms, last 4 seconds
+        // Tier 1: 3/tick. Tier 2: 10/tick. Tier 3: 35/tick + upgrade level multiplier
+        const baseTick = proj.tier === 1 ? 5 : proj.tier === 2 ? 18 : 60;
+        const multiplier = 100 + upgrades.poisonAtkLevel * 15;
+        const tickDmg = Math.round(baseTick * (multiplier / 100));
+
+        wolf.poisonTimer = 4000; // poison ticks last 4 seconds
+        wolf.poisonDmg = tickDmg * 2.0; // stores annualized DPS
+
+        spawnParticles(wolf.x, wolf.y, '#e879f9', 7, 'toxic', 1.3);
+      }
     }
 
-    // 8. Move LASERS
-    const nextLasers: Laser[] = [];
-    lasersRef.current.forEach((laser) => {
-      laser.x += laser.vx;
-      laser.y += laser.vy;
-
-      // Keep inside bounds
-      if (laser.x > 0 && laser.x < dimensions.width && laser.y > 0 && laser.y < dimensions.height) {
-        let hit = false;
-
-        if (laser.isEnemy) {
-          // Check collision with player
-          const distToPlayer = Math.hypot(laser.x - player.x, laser.y - player.y);
-          if (distToPlayer < laser.radius + 15) { // player ship size
-            hit = true;
-            sfx.playDamage();
-            spawnSparks(laser.x, laser.y, '#ef4444', 6, 2.2);
-
-            setShipHp((prev) => {
-              const res = prev - laser.damage;
-              if (res <= 0) onGameOver();
-              return Math.max(0, res);
-            });
-          }
-        } else {
-          // Player lasers hitting METEORS or PIRATES
-          // Check Meteors first
-          for (let i = meteorsRef.current.length - 1; i >= 0; i--) {
-            const m = meteorsRef.current[i];
-            const dist = Math.hypot(laser.x - m.x, laser.y - m.y);
-            if (dist < laser.radius + m.radius) {
-              hit = true;
-              m.hp -= laser.damage;
-              spawnSparks(laser.x, laser.y, m.color, 5, 2);
-
-              if (m.hp <= 0) {
-                // Shatter!
-                sfx.playExplosion('meteor');
-                statsTrackerRef.current.meteorsDestroyed += 1;
-                statsTrackerRef.current.score += Math.round(m.radius * 2);
-                setStats({ ...statsTrackerRef.current });
-
-                // Mineral drops
-                spawnMineral(m.x, m.y, m.mineralType);
-
-                // Split
-                if (m.radius > 35) {
-                  const splRadius = 24;
-                  spawnMeteor(m.x, m.y, splRadius, { vx: m.vx + m.vy * 0.45, vy: m.vy - m.vx * 0.45 });
-                  spawnMeteor(m.x, m.y, splRadius, { vx: m.vx - m.vx * 0.45, vy: m.vy + m.vx * 0.45 });
-                } else if (m.radius > 22) {
-                  const splRadius = 12;
-                  spawnMeteor(m.x, m.y, splRadius, { vx: m.vx + 0.6, vy: m.vy - 0.6 });
-                  spawnMeteor(m.x, m.y, splRadius, { vx: m.vx - 0.6, vy: m.vy + 0.6 });
-                  spawnMeteor(m.x, m.y, splRadius, { vx: -m.vx * 0.8, vy: -m.vy * 0.8 });
-                }
-
-                // Delete meteor
-                meteorsRef.current.splice(i, 1);
-              }
-              break; // exit loop check
-            }
-          }
-
-          // Check Pirate ships
-          if (!hit) {
-            for (let i = piratesRef.current.length - 1; i >= 0; i--) {
-              const p = piratesRef.current[i];
-              const dist = Math.hypot(laser.x - p.x, laser.y - p.y);
-              if (dist < laser.radius + p.radius) {
-                hit = true;
-                p.hp -= laser.damage;
-                spawnSparks(laser.x, laser.y, '#f43f5e', 8);
-
-                if (p.hp <= 0) {
-                  sfx.playExplosion('pirate');
-                  spawnSparks(p.x, p.y, '#f59e0b', 22, 4); // fire shards
-
-                  statsTrackerRef.current.piratesDestroyed += 1;
-                  statsTrackerRef.current.score += 250; // generous pirate points
-                  setStats({ ...statsTrackerRef.current });
-
-                  // Pirates drop multi-crystals of high status
-                  spawnMineral(p.x, p.y, 'exotic');
-                  spawnMineral(p.x - 12, p.y + 12, 'rare');
-                  spawnMineral(p.x + 12, p.y - 12, 'rare');
-
-                  piratesRef.current.splice(i, 1);
-                }
-                break;
-              }
-            }
-          }
-        }
-
-        if (!hit) nextLasers.push(laser);
-      }
-    });
-    lasersRef.current = nextLasers;
-
-    // 9. Update & collect MINERAL CRYSTALS
-    const nextMinerals: Mineral[] = [];
-    mineralsRef.current.forEach((min) => {
-      // apply slow friction context deceleration
-      min.vx *= 0.96;
-      min.vy *= 0.96;
-      min.x += min.vx;
-      min.y += min.vy;
-
-      // -- Blackhole Gravitational Pull on Minerals --
-      if (blackholeRef.current) {
-        const bh = blackholeRef.current;
-        const distToBh = Math.hypot(bh.x - min.x, bh.y - min.y);
-        
-        if (distToBh < bh.radius * 4.0) {
-          // Strong pull proportional to proximity
-          const pullForce = Math.min(5.5, (110 / distToBh) * bh.pullForce);
-          min.vx += ((bh.x - min.x) / distToBh) * pullForce * 0.35;
-          min.vy += ((bh.y - min.y) / distToBh) * pullForce * 0.35;
-        }
-
-        // Vaporize minerals if they hit the pitch-black core center
-        if (distToBh < bh.radius * 0.4) {
-          if (Math.random() < 0.2) {
-            spawnSparks(min.x, min.y, '#a855f7', 3, 1.2);
-          }
-          return; // swallowed by black hole! don't push to nextMinerals
-        }
-      }
-
-      const dist = Math.hypot(min.x - player.x, min.y - player.y);
-
-      // Tractor magnetic grab
-      if (dist < player.magnet) {
-        // Pull strong towards ship center
-        const magnetForce = Math.min(8.5, 300 / dist);
-        min.vx += ((player.x - min.x) / dist) * magnetForce;
-        min.vy += ((player.y - min.y) / dist) * magnetForce;
-      }
-
-      // Collect crystal trigger
-      if (dist < 18) {
-        // Collect!
-        sfx.playCrystalPickup(min.type);
-        onMineralsCollected(min.value);
-        statsTrackerRef.current.mineralsCollected += min.value;
-        statsTrackerRef.current.score += min.value * 10;
-        setStats({ ...statsTrackerRef.current });
-
-        // collect light flashes
-        spawnSparks(min.x, min.y, min.color, 4, 1.5);
-        return; // drop from list update
-      }
-
-      // Floating bounds
-      if (min.x > 0 && min.x < dimensions.width && min.y > 0 && min.y < dimensions.height) {
-        nextMinerals.push(min);
-      }
-    });
-    mineralsRef.current = nextMinerals;
-
-    // 10. Move particles
+    // ----------------------------------------------------
+    // PHYSICS: FLOATING EFFECTS & RENDER PARTICLES
+    // ----------------------------------------------------
     const nextParticles: Particle[] = [];
     particlesRef.current.forEach((p) => {
-      p.x += p.vx;
-      p.y += p.vy;
       p.life++;
-      if (p.life < p.maxLife) {
-        nextParticles.push(p);
+      p.opacity = 1 - (p.life / p.maxLife);
+
+      if (p.type === 'zap') {
+        // Zap particles are instantaneous lighting bolt connectors, no velocity physics
+        if (p.life < p.maxLife) {
+          nextParticles.push(p);
+        }
+      } else {
+        p.x += p.vx;
+        p.y += p.vy;
+        
+        // float slightly upwards for coins/greetings
+        if (p.type === 'gold_coin' || p.type === 'rep') {
+          p.vy -= 0.015;
+        }
+
+        if (p.life < p.maxLife) {
+          nextParticles.push(p);
+        }
       }
     });
     particlesRef.current = nextParticles;
 
-    // --- DRAWING PORTION SFX LINES ---
-    
-    // Draw Cosmic Blackhole Anomaly if active
-    if (blackholeRef.current) {
-      const bh = blackholeRef.current;
-      ctx.save();
-      
-      // Accretion Disk pulsing animation
-      const pulseRadius = bh.radius + Math.sin(timestamp * 0.006) * 4;
-      
-      const grad = ctx.createRadialGradient(bh.x, bh.y, bh.radius * 0.25, bh.x, bh.y, pulseRadius * 2.2);
-      grad.addColorStop(0, '#000000'); // total core dark
-      grad.addColorStop(0.2, '#7e22ce'); // hot purple accretion boundary
-      grad.addColorStop(0.5, 'rgba(139, 92, 246, 0.4)'); // electric violet nebula
-      grad.addColorStop(1, 'rgba(168, 85, 247, 0)'); // fade context
+    // ----------------------------------------------------
+    // DRAWING SCENERY & RANCH BACKGROUNDS
+    // ----------------------------------------------------
+    // 1. Lush green pasture field grass
+    ctx.fillStyle = '#14532d'; // elegant deep dark pasture green
+    ctx.fillRect(0, 0, w, h);
 
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(bh.x, bh.y, pulseRadius * 2.2, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Swirling core rings to symbolize rotational inertial fields
-      ctx.strokeStyle = '#c084fc';
-      ctx.lineWidth = 1.4;
-      ctx.setLineDash([12, 18]);
-      ctx.beginPath();
-      ctx.arc(bh.x, bh.y, bh.radius * 1.3, timestamp * 0.002, timestamp * 0.002 + Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = '#a78bfa';
-      ctx.lineWidth = 2.0;
-      ctx.setLineDash([20, 24]);
-      ctx.beginPath();
-      ctx.arc(bh.x, bh.y, bh.radius * 1.6, -timestamp * 0.0016, -timestamp * 0.0016 + Math.PI * 2);
-      ctx.stroke();
-
-      // Flat pitch-black core singularity
-      ctx.fillStyle = '#010103';
-      ctx.beginPath();
-      ctx.arc(bh.x, bh.y, bh.radius * 0.75, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Glowing Event Horizon contour
-      ctx.strokeStyle = '#ea580c'; // fiery gravity warping orange light refraction ring
-      ctx.shadowColor = '#ea580c';
-      ctx.shadowBlur = 8;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.restore();
-    }
-
-    // Draw Minerals
-    mineralsRef.current.forEach((min) => {
-      ctx.beginPath();
-      ctx.strokeStyle = min.color;
-      ctx.fillStyle = min.color + '40'; // neon bleed fill
-      ctx.lineWidth = 1.5;
-      
-      // glowing diamond shape
-      ctx.moveTo(min.x, min.y - 6);
-      ctx.lineTo(min.x + 4.5, min.y);
-      ctx.lineTo(min.x, min.y + 6);
-      ctx.lineTo(min.x - 4.5, min.y);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.fill();
-
-      // inner glowing core
-      ctx.beginPath();
-      ctx.fillStyle = '#ffffff';
-      ctx.arc(min.x, min.y, 1.8, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    // Draw Laser Beams
-    lasersRef.current.forEach((laser) => {
-      ctx.save();
-      ctx.beginPath();
-      ctx.lineCap = 'round';
-      
-      const beamLength = 16;
-      const startX = laser.x - Math.cos(laser.angle) * beamLength;
-      const startY = laser.y - Math.sin(laser.angle) * beamLength;
-
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(laser.x, laser.y);
-
-      if (laser.isEnemy) {
-        ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = 3.5;
-        // Outer hazard bloom glow
-        ctx.shadowColor = '#ef4444';
-        ctx.shadowBlur = 8;
-      } else {
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 3;
-        ctx.shadowColor = '#0ea5e9';
-        ctx.shadowBlur = 8;
-      }
-      ctx.stroke();
-      ctx.restore();
-    });
-
-    // Draw Meteors
-    meteorsRef.current.forEach((m) => {
-      ctx.save();
-      ctx.translate(m.x, m.y);
-      ctx.rotate(m.angle);
-
-      ctx.beginPath();
-      // Draw custom rugged star shape coordinates
-      ctx.moveTo(m.points[0].x, m.points[0].y);
-      for (let i = 1; i < m.points.length; i++) {
-        ctx.lineTo(m.points[i].x, m.points[i].y);
-      }
-      ctx.closePath();
-
-      // Rock gradient fill
-      const grad = ctx.createRadialGradient(0, 0, m.radius * 0.2, 0, 0, m.radius);
-      grad.addColorStop(0, '#475569');
-      grad.addColorStop(0.7, '#1e293b');
-      grad.addColorStop(1, '#0f172a');
-      
-      ctx.fillStyle = grad;
-      ctx.strokeStyle = m.color;
-      ctx.lineWidth = 1.8;
-      
-      // Glow depending on core
-      ctx.shadowColor = m.color;
-      ctx.shadowBlur = m.mineralType === 'exotic' ? 12 : m.mineralType === 'rare' ? 6 : 0;
-
-      ctx.fill();
-      ctx.stroke();
-
-      // Shading crater lines for realism
-      ctx.strokeStyle = '#47556950';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(-m.radius * 0.3, -m.radius * 0.2, m.radius * 0.2, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(m.radius * 0.2, m.radius * 0.3, m.radius * 0.15, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.restore();
-    });
-
-    // Draw Pirate ships
-    piratesRef.current.forEach((pirate) => {
-      ctx.save();
-      ctx.translate(pirate.x, pirate.y);
-      ctx.rotate(pirate.angle);
-
-      // Draw Menacing Triangle Interceptor
-      ctx.beginPath();
-      ctx.moveTo(pirate.radius * 1.5, 0); // Nose pointing right
-      ctx.lineTo(-pirate.radius, -pirate.radius * 1.1); // Left Rear wing
-      ctx.lineTo(-pirate.radius * 0.4, 0); // Thruster indent
-      ctx.lineTo(-pirate.radius, pirate.radius * 1.1); // Right Rear wing
-      ctx.closePath();
-
-      ctx.fillStyle = '#1e1b4b'; // deep gothic violet
-      ctx.strokeStyle = '#f43f5e'; // glowing hot red contour
-      ctx.lineWidth = 2.2;
-      ctx.shadowColor = '#f43f5e';
-      ctx.shadowBlur = 10;
-      ctx.fill();
-      ctx.stroke();
-
-      // Red central command visor glowing light
-      ctx.beginPath();
-      ctx.fillStyle = '#ef4444';
-      ctx.arc(pirate.radius * 0.3, 0, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Thruster flash engine
-      ctx.beginPath();
-      ctx.fillStyle = '#f43f5e';
-      ctx.moveTo(-pirate.radius * 0.4, -4);
-      ctx.lineTo(-pirate.radius * 1.3, 0);
-      ctx.lineTo(-pirate.radius * 0.4, 4);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.restore();
-    });
-
-    // Draw particles
-    particlesRef.current.forEach((p) => {
-      const remainingLife = (p.maxLife - p.life) / p.maxLife;
-      ctx.fillStyle = p.color;
-      ctx.globalAlpha = remainingLife;
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size * remainingLife, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1.0; // restore
-    });
-
-    // Draw weapons auto range ring around spaceship
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(player.x, player.y, player.range, 0, Math.PI * 2);
-    ctx.strokeStyle = nearestEnemy ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.04)';
+    // Decorative lighter grass clovers
+    ctx.strokeStyle = '#15803d'; // slightly brighter green grid veins
     ctx.lineWidth = 1;
-    ctx.setLineDash([4, 6]);
-    ctx.stroke();
-    ctx.restore();
-
-    // Draw Player Spaceship
-    ctx.save();
-    ctx.translate(player.x, player.y);
-    ctx.rotate(player.angle);
-
-    // Engine flame sparks (creates dynamic thrust aesthetic trailing mouse!)
-    if (distMouse > 15) {
+    for (let lX = 50; lX < w; lX += 80) {
       ctx.beginPath();
-      const flameLength = Math.min(22, 10 + distMouse * 0.08);
-      ctx.moveTo(-12, -4);
-      ctx.lineTo(-12 - flameLength - Math.random() * 6, 0);
-      ctx.lineTo(-12, 4);
-      ctx.closePath();
+      ctx.moveTo(lX, 0);
+      ctx.lineTo(lX, h);
+      ctx.stroke();
+    }
+    for (let lY = 40; lY < h; lY += 80) {
+      ctx.beginPath();
+      ctx.moveTo(0, lY);
+      ctx.lineTo(w, lY);
+      ctx.stroke();
+    }
+
+    // 2. Draw INCOME SHEEP GARDEN (BACKYARD pasture at top-left)
+    ctx.fillStyle = '#064e3b'; // slightly contrasting dark pine green
+    ctx.fillRect(30, 10, 335, 115);
+    
+    // Draw gold boundary fence
+    ctx.strokeStyle = '#eab308'; // glowing yellow/gold border fence
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(30, 10, 335, 115);
+
+    // Draw little wooden sign "황금 목장 (G+)"
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(140, 5, 110, 15);
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(140, 5, 110, 15);
+
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 9px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('🪙 황금 인컴 목장 (골드양)', 195, 16);
+
+    // 3. Draw MAIN COMBAT PASTURE (Where defensive sheeps live)
+    ctx.fillStyle = '#166534'; // bright battle field
+    ctx.fillRect(40, 150, 315, 315);
+    ctx.strokeStyle = '#16a34a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(40, 150, 315, 315);
+
+    // Grid slots drawings (4x4)
+    for (let i = 0; i < 16; i++) {
+      const coord = getSlotCoord(i);
+      const isSelected = selectedSlotIdx === i;
       
-      const flameGrad = ctx.createLinearGradient(-12, 0, -30, 0);
-      flameGrad.addColorStop(0, '#67e8f9'); // cyan flame
-      flameGrad.addColorStop(1, 'rgba(14, 165, 233, 0)');
-      ctx.fillStyle = flameGrad;
+      // Determine if hovered
+      const slotMouseDist = Math.hypot(mouseRef.current.x - coord.x, mouseRef.current.y - coord.y);
+      const isHovered = isMouseInCanvasRef.current && slotMouseDist < gridConfig.slotSize / 2;
+
+      ctx.save();
+      // Draw circular pen
+      ctx.beginPath();
+      ctx.arc(coord.x, coord.y, gridConfig.slotSize / 2, 0, Math.PI * 2);
+      
+      if (isSelected) {
+        ctx.fillStyle = 'rgba(99, 102, 241, 0.45)'; // vibrant indigo highlight
+        ctx.strokeStyle = '#6366f1';
+        ctx.lineWidth = 2.5;
+      } else if (isHovered) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.18)'; // white highlight
+        ctx.strokeStyle = '#f1f5f9';
+        ctx.lineWidth = 1.6;
+      } else {
+        ctx.fillStyle = 'rgba(20, 83, 45, 0.45)'; // dark pen
+        ctx.strokeStyle = '#15803d';
+        ctx.lineWidth = 1.2;
+      }
+
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 4. Draw THE DEFENSIVE WOODEN FENCE (울타리)
+    const fenceX = 420;
+    ctx.save();
+    ctx.fillStyle = '#78350f'; // mahogany dark brown
+    ctx.fillRect(fenceX - 10, 10, 20, h - 20);
+
+    // Draw horizontal steel locks and logs
+    ctx.strokeStyle = '#451a03';
+    ctx.lineWidth = 2;
+    for (let fY = 20; fY < h - 20; fY += 30) {
+      // Wood grains
+      ctx.beginPath();
+      ctx.moveTo(fenceX - 10, fY);
+      ctx.lineTo(fenceX + 10, fY);
+      ctx.stroke();
+
+      // Wood log nodules
+      ctx.fillStyle = '#b45309';
+      ctx.beginPath();
+      ctx.arc(fenceX, fY + 10, 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
 
-    // Outer fighter shape
-    ctx.beginPath();
-    ctx.moveTo(18, 0); // nose pointing right
-    ctx.lineTo(-12, -13); // wing port
-    ctx.lineTo(-7, -4); // port engine deck
-    ctx.lineTo(-12, 0); // tail center
-    ctx.lineTo(-7, 4); // starboard engine deck
-    ctx.lineTo(-12, 13); // wing starboard
-    ctx.closePath();
-
-    ctx.fillStyle = '#0f172a'; // dark metal core color
-    ctx.strokeStyle = '#38bdf8'; // neon light blue wing plates
-    ctx.lineWidth = 2.2;
-    ctx.shadowColor = '#0ea5e9';
-    ctx.shadowBlur = 10;
-    ctx.fill();
-    ctx.stroke();
-
-    // Glow wingtips based on projectile counts to show upgrading severity
-    ctx.fillStyle = '#38bdf8';
-    
-    // Left wingtip weapon dot
-    ctx.beginPath();
-    ctx.arc(-11, -12, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Right wingtip weapon dot
-    ctx.beginPath();
-    ctx.arc(-11, 12, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Cockpit windshield screen
-    ctx.beginPath();
-    ctx.moveTo(6, -4);
-    ctx.lineTo(13, 0);
-    ctx.lineTo(6, 4);
-    ctx.closePath();
-    ctx.fillStyle = '#e2e8f0'; // bright silver cockpit
-    ctx.fill();
-
+    // Outer thick framing
+    ctx.strokeStyle = '#d97706'; // glowing iron strips
+    ctx.lineWidth = 1.2;
+    ctx.strokeRect(fenceX - 11, 10, 22, h - 20);
     ctx.restore();
 
-    // Enqueue next loop
-    frameIdRef.current = requestAnimationFrame(gameLoop);
+    // ----------------------------------------------------
+    // ENTITIES DRAWING PORTION (Sheep, Wolves, Bullet, etc)
+    // ----------------------------------------------------
+    
+    // A. Draw GOLD RESOURCE SHEEP Units
+    goldSheepsRef.current.forEach((gs) => {
+      ctx.save();
+      ctx.translate(gs.x, gs.y);
+      if (gs.flipX) {
+        ctx.scale(-1, 1);
+      }
+
+      // 1. Shadow
+      ctx.fillStyle = 'rgba(5, 46, 22, 0.35)';
+      ctx.beginPath();
+      ctx.ellipse(0, 10, 14, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 1.5 Tiny Cute Legs (Layered behind fleece)
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(-5, 4); ctx.lineTo(-5, 10);
+      ctx.moveTo(-2, 4); ctx.lineTo(-2, 10);
+      ctx.moveTo(2, 4); ctx.lineTo(2, 10);
+      ctx.moveTo(5, 4); ctx.lineTo(5, 10);
+      ctx.stroke();
+      // tiny black hooves
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(-6, 9.5, 2, 2);
+      ctx.fillRect(-3, 9.5, 2, 2);
+      ctx.fillRect(1, 9.5, 2, 2);
+      ctx.fillRect(4, 9.5, 2, 2);
+
+      // 2. Head & Ear (Left facing body primarily)
+      ctx.fillStyle = '#fef08a'; // pale yellow skin
+      ctx.beginPath();
+      ctx.arc(-11, -1, 5.5, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Little floppy head ear
+      ctx.fillStyle = '#fef08a';
+      ctx.beginPath();
+      ctx.ellipse(-8, -4, 2, 3.5, -0.4, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // tiny gold horn
+      ctx.strokeStyle = '#d97706';
+      ctx.lineWidth = 1.7;
+      ctx.beginPath();
+      ctx.moveTo(-12, -5);
+      ctx.quadraticCurveTo(-15, -10, -10, -11);
+      ctx.stroke();
+
+      // 3. Fluffy Gold Body (Chubby circles clumped)
+      ctx.fillStyle = '#fbbf24'; // bright sparkly gold
+      const puffs = [
+        { cx: 0, cy: -4, r: 8 },
+        { cx: -5, cy: 1, r: 7.5 },
+        { cx: 5, cy: 1, r: 7.5 },
+        { cx: 6, cy: -3, r: 7 },
+        { cx: -1, cy: 5, r: 8 },
+      ];
+      puffs.forEach((p) => {
+        ctx.beginPath();
+        ctx.arc(p.cx, p.cy, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // 4. Googly Eyes
+      ctx.fillStyle = '#1e293b'; // dark eye
+      ctx.beginPath();
+      ctx.arc(-12, -2, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 5. Chew Animation grass
+      if (gs.isChewing) {
+        ctx.strokeStyle = '#22c55e';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(-13, 2);
+        ctx.lineTo(-18, 5 + Math.sin(timestamp * 0.015) * 2);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    });
+
+    // B. Draw DEFENSIVE COMBAT SHEEP UNITS
+    sheepUnits.forEach((sheep) => {
+      ctx.save();
+      ctx.translate(sheep.x, sheep.y);
+
+      // 1. Pen Ground Shadow
+      ctx.fillStyle = 'rgba(20, 83, 45, 0.4)';
+      ctx.beginPath();
+      ctx.ellipse(0, 15, 14, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Size scale based on Tier
+      const sizeScale = sheep.tier === 1 ? 1.0 : sheep.tier === 2 ? 1.25 : 1.52;
+
+      // 1.5 Tiny Cute Legs (Layered behind fleece)
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1.8 * sizeScale;
+      ctx.beginPath();
+      ctx.moveTo(-5 * sizeScale, 4 * sizeScale); ctx.lineTo(-5 * sizeScale, 13 * sizeScale);
+      ctx.moveTo(-1 * sizeScale, 4 * sizeScale); ctx.lineTo(-1 * sizeScale, 13 * sizeScale);
+      ctx.moveTo(3 * sizeScale, 4 * sizeScale); ctx.lineTo(3 * sizeScale, 13 * sizeScale);
+      ctx.moveTo(7 * sizeScale, 4 * sizeScale); ctx.lineTo(7 * sizeScale, 13 * sizeScale);
+      ctx.stroke();
+      // tiny black hooves
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(-6.5 * sizeScale, 11.5 * sizeScale, 2.5 * sizeScale, 2.2 * sizeScale);
+      ctx.fillRect(-2.5 * sizeScale, 11.5 * sizeScale, 2.5 * sizeScale, 2.2 * sizeScale);
+      ctx.fillRect(1.5 * sizeScale, 11.5 * sizeScale, 2.5 * sizeScale, 2.2 * sizeScale);
+      ctx.fillRect(5.5 * sizeScale, 11.5 * sizeScale, 2.5 * sizeScale, 2.2 * sizeScale);
+
+      // 2. Select visual parameters based on Sheep type & tier
+      // Set type colors
+      let faceColor = '#f1f5f9';
+      let fleeceColor = '#cbd5e1';
+      let accentColor = '#94a3b8';
+
+      if (sheep.type === 'fire') {
+        faceColor = '#f43f5e'; fleeceColor = '#e11d48'; accentColor = '#f97316';
+      } else if (sheep.type === 'freeze') {
+        faceColor = '#38bdf8'; fleeceColor = '#0284c7'; accentColor = '#60a5fa';
+      } else if (sheep.type === 'lightning') {
+        faceColor = '#facc15'; fleeceColor = '#d97706'; accentColor = '#fef08a';
+      } else if (sheep.type === 'poison') {
+        faceColor = '#d946ef'; fleeceColor = '#a21caf'; accentColor = '#c084fc';
+      }
+
+      // 3. Tiny head facing right towards enemies
+      ctx.fillStyle = faceColor;
+      ctx.beginPath();
+      ctx.arc(12 * sizeScale, -2 * sizeScale, 6 * sizeScale, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Floppy droopy ears on head
+      ctx.fillStyle = faceColor;
+      ctx.beginPath();
+      ctx.ellipse(9 * sizeScale, -1 * sizeScale, 1.8 * sizeScale, 3.5 * sizeScale, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Curly wool cap on top of head
+      ctx.fillStyle = fleeceColor;
+      ctx.beginPath();
+      ctx.arc(11 * sizeScale, -6 * sizeScale, 3 * sizeScale, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Googly large big eyes that look right!
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(14 * sizeScale, -3.5 * sizeScale, 2.2 * sizeScale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#0f172a';
+      ctx.beginPath();
+      ctx.arc(15 * sizeScale, -3.5 * sizeScale, 1.1 * sizeScale, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ELEMENT SPECIFIC PHYSICAL TRAITS (Horns / Accents)
+      if (sheep.type === 'normal') {
+        // Classic curvy wool ram horns
+        ctx.strokeStyle = '#a16207';
+        ctx.lineWidth = 1.9 * sizeScale;
+        ctx.beginPath();
+        ctx.arc(8 * sizeScale, -5 * sizeScale, 4.2 * sizeScale, Math.PI * 1.3, Math.PI * 0.3);
+        ctx.stroke();
+      } else if (sheep.type === 'fire') {
+        // Fiery flame ears/horns swooping up
+        ctx.fillStyle = '#f97316';
+        ctx.beginPath();
+        ctx.moveTo(8 * sizeScale, -6 * sizeScale);
+        ctx.quadraticCurveTo(5 * sizeScale, -15 * sizeScale, 9 * sizeScale, -14 * sizeScale);
+        ctx.quadraticCurveTo(11 * sizeScale, -10 * sizeScale, 11 * sizeScale, -6 * sizeScale);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.moveTo(10 * sizeScale, -6 * sizeScale);
+        ctx.quadraticCurveTo(10 * sizeScale, -18 * sizeScale, 13 * sizeScale, -17 * sizeScale);
+        ctx.quadraticCurveTo(13 * sizeScale, -11 * sizeScale, 12 * sizeScale, -6 * sizeScale);
+        ctx.closePath();
+        ctx.fill();
+      } else if (sheep.type === 'freeze') {
+        // Sharp light-blue frosty crystal spikes
+        ctx.fillStyle = '#bae6fd';
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 0.8 * sizeScale;
+        // shard 1
+        ctx.beginPath();
+        ctx.moveTo(7 * sizeScale, -6 * sizeScale);
+        ctx.lineTo(4 * sizeScale, -13 * sizeScale);
+        ctx.lineTo(9 * sizeScale, -9 * sizeScale);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // shard 2
+        ctx.beginPath();
+        ctx.moveTo(10 * sizeScale, -6 * sizeScale);
+        ctx.lineTo(11 * sizeScale, -15 * sizeScale);
+        ctx.lineTo(13 * sizeScale, -8 * sizeScale);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+      } else if (sheep.type === 'lightning') {
+        // Jagged shock lightning bolts
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 1.8 * sizeScale;
+        ctx.beginPath();
+        ctx.moveTo(9 * sizeScale, -5 * sizeScale);
+        ctx.lineTo(6 * sizeScale, -11 * sizeScale);
+        ctx.lineTo(10 * sizeScale, -10 * sizeScale);
+        ctx.lineTo(8 * sizeScale, -16 * sizeScale);
+        ctx.stroke();
+      } else if (sheep.type === 'poison') {
+        // Toxic slime bubbles on head
+        ctx.fillStyle = '#e879f9';
+        ctx.beginPath();
+        ctx.arc(8 * sizeScale, -10 * sizeScale, 2.8 * sizeScale, 0, Math.PI * 2);
+        ctx.arc(12 * sizeScale, -11 * sizeScale, 2.2 * sizeScale, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 4. Glowing wool (Chubby cumulative circles)
+      ctx.fillStyle = fleeceColor;
+      const bp = [
+        { x: 0, y: -5, r: 9 },
+        { x: -7, y: 1, r: 8.5 },
+        { x: 7, y: 1, r: 8.5 },
+        { x: 6, y: -4, r: 8 },
+        { x: -1, y: 6, r: 9 },
+      ];
+      bp.forEach((p) => {
+        ctx.beginPath();
+        ctx.arc(p.x * sizeScale, p.y * sizeScale, p.r * sizeScale, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // 5. Crown decoration for Tier 2 or 3!
+      if (sheep.tier >= 2) {
+        ctx.fillStyle = '#facc15'; // golden crown
+        ctx.strokeStyle = '#d97706';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        // crown points
+        ctx.moveTo(-6 * sizeScale, -13 * sizeScale);
+        ctx.lineTo(-3 * sizeScale, -9 * sizeScale);
+        ctx.lineTo(0, -14 * sizeScale);
+        ctx.lineTo(3 * sizeScale, -9 * sizeScale);
+        ctx.lineTo(6 * sizeScale, -13 * sizeScale);
+        // crown base
+        ctx.lineTo(4 * sizeScale, -7 * sizeScale);
+        ctx.lineTo(-4 * sizeScale, -7 * sizeScale);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Tier 3 glowing aura arcs
+        if (sheep.tier === 3) {
+          ctx.strokeStyle = accentColor;
+          ctx.setLineDash([4, 6]);
+          ctx.lineWidth = 1.8;
+          ctx.beginPath();
+          ctx.arc(0, 0, 22 * sizeScale, timestamp * 0.003, timestamp * 0.003 + Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]); // reset
+        }
+      }
+
+      // Display Tier star text beneath the cute unit
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'black 9px system-ui';
+      ctx.textAlign = 'center';
+      const tierStars = '★'.repeat(sheep.tier);
+      ctx.fillText(tierStars, 0, 18 * sizeScale);
+
+      ctx.restore();
+    });
+
+    // C. Draw HOSTILE WOLVES
+    wolvesRef.current.forEach((wolf) => {
+      ctx.save();
+      ctx.translate(wolf.x, wolf.y);
+
+      // Direction sweep legs animation based on speed
+      const swing = Math.sin(timestamp * 0.012) * 5;
+
+      // 1. Shadow
+      ctx.fillStyle = 'rgba(5, 46, 22, 0.4)';
+      ctx.beginPath();
+      ctx.ellipse(0, wolf.size * 0.8, wolf.size * 1.1, wolf.size * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Color mapping based on debuffs
+      let bodyColor = '#4b5563'; // wolf Slate Gray
+      let earBrushColor = '#ef4444'; // red malicious outline
+
+      if (wolf.slowTimer > 0) {
+        bodyColor = '#bae6fd'; // frozen blue!
+        earBrushColor = '#0ea5e9';
+      } else if (wolf.poisonTimer > 0) {
+        bodyColor = '#d946ef'; // toxic fuchsia!
+        earBrushColor = '#a21caf';
+      }
+
+      // 2. Draw Wolf snout & head facing left!
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      // wolf body ellipse
+      ctx.ellipse(0, 0, wolf.size * 1.2, wolf.size * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Jagged back mane/fur (Wild beast details)
+      ctx.fillStyle = wolf.slowTimer > 0 ? '#0ea5e9' : '#1f2937';
+      ctx.beginPath();
+      ctx.moveTo(-wolf.size * 0.3, -wolf.size * 0.7);
+      ctx.lineTo(-wolf.size * 0.45, -wolf.size * 1.1);
+      ctx.lineTo(0, -0.7 * wolf.size);
+      ctx.lineTo(wolf.size * 0.25, -wolf.size * 1.05);
+      ctx.lineTo(wolf.size * 0.5, -wolf.size * 0.7);
+      ctx.closePath();
+      ctx.fill();
+
+      // Long bushy tail swaying procedurally
+      const tailSway = Math.sin(timestamp * 0.008 + wolf.x * 0.04) * 0.24;
+      ctx.save();
+      ctx.translate(wolf.size * 1.0, -wolf.size * 0.15);
+      ctx.rotate(0.4 + tailSway);
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, wolf.size * 0.82, wolf.size * 0.3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // tail fluffy tip
+      ctx.fillStyle = earBrushColor;
+      ctx.beginPath();
+      ctx.ellipse(wolf.size * 0.55, 0, wolf.size * 0.34, wolf.size * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // snout triangle pointing left
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.moveTo(-wolf.size * 0.8, -wolf.size * 0.25);
+      ctx.lineTo(-wolf.size * 1.85, wolf.size * 0.05);
+      ctx.lineTo(-wolf.size * 0.7, wolf.size * 0.45);
+      ctx.closePath();
+      ctx.fill();
+
+      // Snout nose tip
+      ctx.fillStyle = '#0f172a';
+      ctx.beginPath();
+      ctx.arc(-wolf.size * 1.85, wolf.size * 0.05, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Fierce white fangs showing in lower jaw
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      // top tooth
+      ctx.moveTo(-wolf.size * 1.35, wolf.size * 0.12);
+      ctx.lineTo(-wolf.size * 1.45, wolf.size * 0.36);
+      ctx.lineTo(-wolf.size * 1.25, wolf.size * 0.12);
+      ctx.closePath();
+      ctx.fill();
+
+      // Wolf ears pointing backwards/up (Double ears for depth!)
+      // Back ear
+      ctx.fillStyle = wolf.slowTimer > 0 ? '#0284c7' : '#374151';
+      ctx.beginPath();
+      ctx.moveTo(-wolf.size * 0.1, -wolf.size * 0.55);
+      ctx.lineTo(wolf.size * 0.25, -wolf.size * 1.35);
+      ctx.lineTo(wolf.size * 0.5, -wolf.size * 0.45);
+      ctx.closePath();
+      ctx.fill();
+
+      // Front ear
+      ctx.fillStyle = earBrushColor;
+      ctx.beginPath();
+      ctx.moveTo(0.15 * wolf.size, -0.6 * wolf.size);
+      ctx.lineTo(0.55 * wolf.size, -1.45 * wolf.size);
+      ctx.lineTo(0.75 * wolf.size, -0.45 * wolf.size);
+      ctx.closePath();
+      ctx.fill();
+
+      // Malicious glowing red eyes
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.ellipse(-wolf.size * 1.05, -wolf.size * 0.18, 2.8, 1.3, -0.15, 0, Math.PI * 2);
+      ctx.fill();
+      // yellow slit pupil
+      ctx.fillStyle = '#fbbf24';
+      ctx.beginPath();
+      ctx.ellipse(-wolf.size * 1.07, -wolf.size * 0.18, 0.8, 1.2, -0.15, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 3. Legs swinging
+      ctx.strokeStyle = bodyColor;
+      ctx.lineWidth = wolf.size * 0.2;
+      // front leg
+      ctx.beginPath();
+      ctx.moveTo(-wolf.size * 0.5, wolf.size * 0.6);
+      ctx.lineTo(-wolf.size * 0.5 + swing, wolf.size * 1.1);
+      ctx.stroke();
+      // back leg
+      ctx.beginPath();
+      ctx.moveTo(wolf.size * 0.5, wolf.size * 0.6);
+      ctx.lineTo(wolf.size * 0.5 - swing, wolf.size * 1.1);
+      ctx.stroke();
+
+      // 4. Draw simple HP gauge above wolf
+      const barW = wolf.size * 1.8;
+      const barH = 3.5;
+      const hpRatio = wolf.hp / wolf.maxHp;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(-barW / 2, -wolf.size * 1.2, barW, barH);
+      
+      ctx.fillStyle = wolf.slowTimer > 0 ? '#38bdf8' : '#ef4444';
+      ctx.fillRect(-barW / 2, -wolf.size * 1.2, barW * Math.max(0, hpRatio), barH);
+
+      ctx.restore();
+    });
+
+    // D. Draw BULLET PROJECTILES
+    projectilesRef.current.forEach((proj) => {
+      ctx.save();
+      ctx.translate(proj.x, proj.y);
+
+      let bulletColor = '#f1f5f9';
+      let size = 4 + proj.tier * 1.5;
+
+      if (proj.type === 'fire') {
+        bulletColor = '#ef4444';
+      } else if (proj.type === 'freeze') {
+        bulletColor = '#0ea5e9';
+      } else if (proj.type === 'lightning') {
+        bulletColor = '#eab308';
+      } else if (proj.type === 'poison') {
+        bulletColor = '#d946ef';
+      }
+
+      ctx.shadowColor = bulletColor;
+      ctx.shadowBlur = proj.tier * 5;
+
+      ctx.fillStyle = bulletColor;
+      ctx.beginPath();
+      
+      // Fire projectiles are larger and more circular, freeze are elongated shards
+      if (proj.type === 'freeze') {
+        ctx.ellipse(0, 0, size * 1.8, size * 0.65, Math.atan2(proj.vy, proj.vx), 0, Math.PI * 2);
+      } else {
+        ctx.arc(0, 0, size, 0, Math.PI * 2);
+      }
+      ctx.fill();
+
+      // Core white center for extra glow weight
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    });
+
+    // E. Draw CONNECTING LIGHTNING ZAP vectors
+    particlesRef.current.forEach((p) => {
+      if (p.type === 'zap') {
+        ctx.save();
+        ctx.strokeStyle = p.color;
+        ctx.lineWidth = p.size;
+        
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        
+        // Jagged path rendering for procedural shockwaves!
+        const dx = p.vx - p.x;
+        const dy = p.vy - p.y;
+        const dist = Math.hypot(dx, dy);
+        const steps = 4;
+        
+        const normalX = -dy / dist;
+        const normalY = dx / dist;
+
+        for (let j = 1; j < steps; j++) {
+          const ratio = j / steps;
+          const wobble = (Math.random() * 18 - 9) * (1 - ratio);
+          const tX = p.x + dx * ratio + normalX * wobble;
+          const tY = p.y + dy * ratio + normalY * wobble;
+          ctx.lineTo(tX, tY);
+        }
+
+        ctx.lineTo(p.vx, p.vy);
+        ctx.stroke();
+        ctx.restore();
+      }
+    });
+
+    // F. Draw STANDARD DRIFT PARTICLES (greetings, fleece chunks, coins)
+    particlesRef.current.forEach((p) => {
+      if (p.type === 'zap') return; // already drawn above in backline
+
+      ctx.save();
+      ctx.globalAlpha = p.opacity || 1;
+      ctx.fillStyle = p.color;
+
+      if (p.type === 'gold_coin') {
+        // Draw miniature shiny gold coin
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#d97706';
+        ctx.font = 'bold 7px system-ui';
+        ctx.fillText('$', p.x - 2, p.y + 2.5);
+      } 
+      else if (p.type === 'rep') {
+        // Drifts positive greetings text or new wave alerts
+        ctx.font = 'black 14px system-ui';
+        ctx.fillStyle = '#fbbf24';
+        ctx.textAlign = 'center';
+        ctx.fillText('⚡ WAVE UPGRADE! ⚡', p.x, p.y);
+      } 
+      else if (p.type === 'fleece') {
+        // Draws fuzzy wool clouds
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      } 
+      else {
+        // Standard sparks/embers
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    });
+
+    // Queue next frame
+    frameIdRef.current = requestAnimationFrame(performGameStep);
   };
 
-  // Attach loops
+  // Launch and bind drawing update engine loop
   useEffect(() => {
-    if (isPlaying && !isPaused) {
-      frameIdRef.current = requestAnimationFrame(gameLoop);
-    }
+    frameIdRef.current = requestAnimationFrame(performGameStep);
     return () => {
-      if (frameIdRef.current) cancelAnimationFrame(frameIdRef.current);
+      if (frameIdRef.current) {
+        cancelAnimationFrame(frameIdRef.current);
+      }
     };
-  }, [isPlaying, isPaused, dimensions]);
+  }, [isPlaying, isPaused, stats, upgrades, sheepUnits, selectedSlotIdx]);
 
   return (
     <div 
-      className="w-full h-full relative cursor-crosshair rounded-2xl overflow-hidden border border-neutral-800/60 bg-neutral-950" 
       ref={containerRef}
+      className="w-full h-full bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden relative shadow-inner cursor-crosshair min-h-[440px]"
     >
       <canvas
-        id="space-arena-canvas"
+        id="ranch-game-stage"
         ref={canvasRef}
         width={dimensions.width}
         height={dimensions.height}
-        className="block"
+        onClick={handleCanvasClick}
         onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-        onMouseEnter={handleMouseEnter}
+        onMouseLeave={() => { isMouseInCanvasRef.current = false; }}
+        onMouseEnter={() => { isMouseInCanvasRef.current = true; }}
+        className="block"
       />
-      
-      {/* Dynamic guidance overlay when game starts */}
-      {!isMouseInCanvasRef.current && isPlaying && (
-        <div className="absolute inset-0 bg-neutral-950/40 flex items-center justify-center text-center pointer-events-none transition-all duration-300">
-          <div className="px-5 py-3 rounded-full bg-black/60 border border-neutral-800/80 backdrop-blur-md animate-pulse">
-            <p className="text-xs text-neutral-400 font-sans tracking-wide">
-              마우스 커서를 이 영역으로 가져오면 비행선을 조종할 수 있습니다!
-            </p>
-          </div>
-        </div>
-      )}
+
+      {/* Touch helper HUD indicators */}
+      <div className="absolute top-2 right-4 text-[9px] text-indigo-300 font-mono select-none pointer-events-none bg-neutral-950/70 p-1.5 rounded border border-indigo-500/20 max-w-[280px]">
+        <span className="font-sans font-bold text-neutral-200">💡 통제 기기 매뉴얼:</span>
+        <br />• 양 클릭 시 유닛 선택!
+        <br />• 유닛 선택 후 빈 슬롯 클릭 시 이동/배치!
+        <br />• 다른 양 클릭 시 슬롯 즉각 교환!
+      </div>
     </div>
   );
 };
