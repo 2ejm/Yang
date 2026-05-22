@@ -1,0 +1,6 @@
+{
+  "name": "Cosmic Drifter",
+  "description": "마우스로 조종하여 우주 먼지와 유성을 채굴하고, 습격해오는 외계 해적에 침착히 맞서며 우주선을 점진적으로 강화해나가는 고품격 생존 슈팅 아케이드 게임",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
